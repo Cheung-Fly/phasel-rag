@@ -95,3 +95,8 @@ _screenshot*.png
 *-snapshot-*/
 authorized_keys*
 ssh-backup/
+
+# ---------- 本地环境文档 ----------
+# docs/local/ 讲的是"怎么在自己的电脑上配环境"（SSH、VS Code Remote、
+# 换电脑迁移等），对项目本身的读者没有意义，因此不进版本库。
+docs/local/

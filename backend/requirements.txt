@@ -1,0 +1,30 @@
+# ---- Phase 1 RAG backend dependencies ----
+# 统一走 OpenAI 兼容协议：一个依赖包同时覆盖 chat 和 embedding。
+# 阿里百炼与阶段三的 llama.cpp 都用它。
+
+# Web API
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.9
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+
+# RAG orchestration + vector store
+langchain>=0.3,<2
+langchain-core>=0.3,<2
+langchain-community>=0.3,<2
+langchain-text-splitters>=0.3,<2
+langchain-chroma>=0.2,<2
+chromadb>=0.5,<2
+
+# Document parsers
+pypdf>=4.2
+
+# LLM + Embedding：阿里百炼（OpenAI 兼容），阶段三的 llama.cpp 也用它
+langchain-openai>=0.2,<2
+
+# Redis 对话记忆（Upstash 走 TLS，redis-py 自带支持）
+redis>=5,<7
+
+# 观测
+httpx>=0.27

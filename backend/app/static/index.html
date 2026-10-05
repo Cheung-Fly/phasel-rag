@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>私有知识库问答</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<!-- 移动端侧栏开关 -->
+<button class="btn-menu" id="btnMenu" title="显示/隐藏侧栏">☰</button>
+
+<div class="layout">
+
+  <!-- ==================== 左侧栏 ==================== -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-text">
+        <div class="brand-title">私有知识库</div>
+        <div class="brand-sub">阶段一 · RAG</div>
+      </div>
+      <button class="icon-btn" id="btnTheme" title="切换主题 (Ctrl+/)">☀</button>
+    </div>
+
+    <!-- ---------- 知识库 ---------- -->
+    <section class="panel">
+      <h3 class="panel-title">知识库</h3>
+
+      <!-- label[for] + 隐藏 input：原生 file input 无法可靠改样式 -->
+      <label class="dropzone" id="dropzone" for="fileInput">
+        <span class="dz-icon">＋</span>
+        <span class="dz-text">点击选择，或拖文件到这里</span>
+        <span class="dz-hint">.md / .txt / .pdf · 最大 20MB</span>
+      </label>
+      <input type="file" id="fileInput" accept=".md,.markdown,.txt,.pdf" hidden>
+
+      <div class="upload-progress" id="uploadProgress" hidden>
+        <div class="up-name" id="upName"></div>
+        <div class="up-bar"><div class="up-bar-fill" id="upBarFill"></div></div>
+        <div class="up-status" id="upStatus"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h3 class="panel-title">
+        已入库文档 <span class="count" id="docCount">0</span>
+      </h3>
+      <ul class="doc-list" id="docList">
+        <li class="empty">还没有文档</li>
+      </ul>
+    </section>
+
+    <!-- ---------- 会话历史 ---------- -->
+    <section class="panel grow">
+      <h3 class="panel-title">
+        会话历史
+        <button class="link-btn" id="btnClearAll" title="清空所有会话记忆">全清</button>
+      </h3>
+      <ul class="session-list" id="sessionList">
+        <li class="empty">还没有会话</li>
+      </ul>
+    </section>
+
+    <!-- ---------- 后端状态 ---------- -->
+    <section class="panel">
+      <h3 class="panel-title">后端状态</h3>
+      <div class="health" id="health">
+        <span class="dot dot-gray"></span><span>检测中…</span>
+      </div>
+    </section>
+
+    <div class="sidebar-foot">
+      单击会话打开 · 双击导出 · Ctrl+K 聚焦输入
+    </div>
+  </aside>
+
+  <!-- ==================== 右侧对话区 ==================== -->
+  <main class="chat">
+    <header class="chat-header">
+      <div class="chat-title">知识库问答</div>
+      <div class="chat-actions">
+        <span class="session-tag" id="sessionTag" title="当前会话 ID">—</span>
+        <button class="btn-ghost" id="btnNewChat" title="开一个新会话">新会话</button>
+      </div>
+    </header>
+
+    <div class="messages" id="messages"></div>
+
+    <form class="composer" id="composer">
+      <textarea id="question" rows="1"
+        placeholder="输入问题 · Enter 发送 · Shift+Enter 换行"></textarea>
+      <button type="button" class="btn-stop" id="btnStop" hidden title="停止生成 (Esc)">停止</button>
+      <button type="submit" id="btnSend">发送</button>
+    </form>
+  </main>
+
+</div>
+
+<!-- 轻提示 -->
+<div class="toast" id="toast"></div>
+
+<!-- 顺序有依赖：markdown / sse / store 必须先于 app -->
+<script src="./markdown.js"></script>
+<script src="./sse.js"></script>
+<script src="./store.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+# ============================================================
+#  阶段一 RAG 服务 — Azure Standard_B2ts_v2 专用编排
+#  目标机：2 vCPU / 1 GiB RAM（突发型 ts 系列，基础 CPU 仅 20%）
+#
+#  两条硬约束：
+#   1) 内存只有 1 GiB → 每个容器必须设上限，否则 OOM Kill
+#   2) CPU 额度只有 24 credits/小时 → 严禁无谓的 CPU 空转（会耗尽额度被限速）
+# ============================================================
+
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: phase1-rag-api:0.1.0
+    container_name: rag-api
+    restart: unless-stopped
+    # 以宿主机用户身份运行，保证 ./data 下的文件属主一致、可读写。
+    # 为什么必须指定：/home/azureuser 权限是 750，容器若以镜像内的
+    # appuser(10001) 运行，连这个目录都穿越不进去，bind mount 会 Permission denied。
+    # 为什么用 COMPOSE_USER 而不是 UID/GID：bash 里 UID 是只读变量，
+    # 脚本无法 export 它，所以统一用一个自定义变量传 "uid:gid"。
+    user: "${COMPOSE_USER:-1000:1000}"
+    env_file:
+      - .env
+    ports:
+      # 只监听本机，公网入口交给 SSH 隧道 / Nginx。
+      # 直接暴露 0.0.0.0 等于把 API Key 挂到公网上。
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # 持久化目录：容器重建不丢知识库
+      - ./data/chroma:/app/data/chroma
+      - ./data/uploads:/app/data/uploads
+    # ---- 内存护栏：1 GiB 机器上这是保命配置 ----
+    # 系统(OS+Docker)常驻约 250MB，留给业务 600MB，其余靠 swap 兜底
+    mem_limit: 600m
+    memswap_limit: 1600m   # 允许借用 swap 抗瞬时峰值，但见下方 swappiness 说明
+    environment:
+      - PYTHONUNBUFFERED=1
+      # 2 vCPU → 给 2 线程。注意别设更大，1GiB 机器上超配线程只会加剧换页
+      - OMP_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+      - TOKENIZERS_PARALLELISM=false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

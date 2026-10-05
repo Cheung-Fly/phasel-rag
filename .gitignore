@@ -1,0 +1,97 @@
+# ============================================================
+#  .gitignore — 阶段一 RAG 项目
+#  目的：确保「密钥、数据、生成物」永远不会被提交
+# ============================================================
+
+# ---------- 🔴 最高优先级：密钥 ----------
+# .env 里有 DASHSCOPE_API_KEY，等价于密码。绝不能提交。
+.env
+.env.*
+
+# 例外：模板文件不含真实密钥，应该提交。
+# ★ 注意：否定规则必须单独占一行，后面不能跟注释。
+#   Git 的 .gitignore **不支持行尾注释** —— 不像 .ini/.conf，
+#   它会把 `!.env.example   # 说明文字` 整行当成模式名，
+#   于是这条否定规则完全失效，.env.example 仍会被上面的 .env.* 挡住。
+!.env.example
+
+# 编辑 .env 前做的备份（我曾创建过 .env.bak，它同样含明文密钥）
+*.env.bak
+*.env.old
+*.env.save
+
+# ---------- 🔴 运行时数据 ----------
+# data/ 里是向量库和用户上传的原始文档。
+#   1) 属于「数据」不是「代码」，不该进版本库
+#   2) 体积会持续增长，且可能含敏感业务文档
+# 注意：删除 data/ 等于知识库清零，所以本地保留、只是不提交。
+#
+# ★ 这里必须写 data/* 而不是 data/
+#   原因：Git 的一条规则是「父目录被排除后，无法再重新包含其中的文件」。
+#   如果写 data/，Git 根本不会进入这个目录，下面的 !data/.gitkeep 就失效了。
+#   写成 data/* 则只排除目录内容、不排除目录本身，negation 才能生效。
+data/*
+!data/.gitkeep
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境（本项目用 Docker，本地不需要，但防止误提交）
+.venv/
+venv/
+env/
+ENV/
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# 打包产物
+build/
+dist/
+*.egg-info/
+
+# ---------- Docker ----------
+# 构建上下文很大，不该进仓库
+.docker/
+docker-compose.override.yml
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 日志 ----------
+*.log
+logs/
+
+# ---------- 临时 / 测试产物 ----------
+# 我调试时生成的脚本，不应留在仓库里
+_tmp_*
+_sse_*.py
+_chunk_test.py
+_test_*.js
+_extract_docx.py
+_docx_dump.txt
+_verify_doc_code.py
+_check_doc.py
+_set_key.py
+_screenshot*.png
+
+# ---------- 备份 / 快照 ----------
+# 清空服务器前做的快照，属于运维产物，不是项目内容
+*.tar.gz
+*.zip
+*-snapshot-*/
+authorized_keys*
+ssh-backup/

@@ -1,10 +1,11 @@
 # ============================================================
-#  阶段一 RAG 服务 — Azure Standard_B2ts_v2 专用编排
-#  目标机：2 vCPU / 1 GiB RAM（突发型 ts 系列，基础 CPU 仅 20%）
+#  阶段一 RAG 服务 — Azure Standard_B2as_v2 专用编排
+#  目标机：2 vCPU / 8 GiB RAM（AMD EPYC 7763，CPU 基线 40%，累积 48 credits/小时）
 #
-#  两条硬约束：
-#   1) 内存只有 1 GiB → 每个容器必须设上限，否则 OOM Kill
-#   2) CPU 额度只有 24 credits/小时 → 严禁无谓的 CPU 空转（会耗尽额度被限速）
+#  两条硬约束（2026-10-07 按实况重定）：
+#   1) 机型已由 B2ts_v2(2 vCPU / 1 GiB) 升级为 B2as_v2(2 vCPU / 8 GiB)
+#      → 容器内存上限同步放宽到 4 GiB，避免大文档/并发被无谓 OOM Kill
+#   2) CPU 基线由 20% 提升到 40%，但仍非无限 → 依旧禁止无谓的 CPU 空转
 # ============================================================
 
 services:
@@ -31,17 +32,23 @@ services:
       # 持久化目录：容器重建不丢知识库
       - ./data/chroma:/app/data/chroma
       - ./data/uploads:/app/data/uploads
-    # ---- 内存护栏：1 GiB 机器上这是保命配置 ----
-    # 系统(OS+Docker)常驻约 250MB，留给业务 600MB，其余靠 swap 兜底
-    mem_limit: 600m
-    memswap_limit: 1600m   # 允许借用 swap 抗瞬时峰值，但见下方 swappiness 说明
+    # ---- 内存护栏（2026-10-07 按 8 GiB 实况重定）----
+    # 原值 600m / 1600m 是 1 GiB 机型时代的"保命配置"：系统常驻约 250MB，
+    # 只剩 600MB 给业务，稍大的 PDF 解析或并发问答就会被 OOM Kill（exit 137）。
+    # 现在给业务 4 GiB（约占机器一半），swap 仅作极端兜底；
+    # swappiness 已由 60 下调到 10，避免热页被换出后检索延迟抖动。
+    mem_limit: 4g
+    memswap_limit: 5g
     environment:
       - PYTHONUNBUFFERED=1
-      # 2 vCPU → 给 2 线程。注意别设更大，1GiB 机器上超配线程只会加剧换页
+      # 2 vCPU → 给 2 线程；在 2 vCPU 上超配线程只会增加上下文切换开销
       - OMP_NUM_THREADS=2
       - OPENBLAS_NUM_THREADS=2
       - MKL_NUM_THREADS=2
       - TOKENIZERS_PARALLELISM=false
+      # HTTP 层护栏：跨域白名单（留空=仅同源）；单文件上传上限(MB)
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-50}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
       interval: 30s

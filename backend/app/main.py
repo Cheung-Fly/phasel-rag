@@ -4,12 +4,17 @@
   - 文档管理：上传 / 列表 / 删除
   - 问答：普通（一次性返回）+ 流式（SSE 逐字返回）
   - 记忆：查询 / 清空
-  - 前端：挂载在 /ui（纯 HTML/CSS/JS 三件套）
+  - 前端：挂载在 /ui（纯 HTML/CSS/JS 三件套，目录来自宿主机挂载）
 
 存储拓扑（2026-10-07 起）：
     本进程只负责业务逻辑，三种数据各自独立成服务 ——
     向量 → 独立 Chroma 容器；会话存档 → PostgreSQL（真相源）；
     会话热缓存 → Redis。本进程挂了，数据一条都不会丢。
+
+前端拓扑（2026-10-07 起）：
+    前端文件不再打进镜像，而是宿主机 ./frontend 只读挂载到 FRONTEND_DIR。
+    因此本进程只做「把静态文件发出去」这一件事，前端可以随时被替换/升级；
+    若启用了 nginx profile，nginx 会接管静态文件与反向代理，本挂载仍可用。
 """
 import json
 import logging
@@ -18,7 +23,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -92,6 +97,11 @@ def health() -> dict:
         "memory_backend": get_memory().backend_summary(),
         "vector_store": f"chroma://{s.chroma_host}:{s.chroma_port}",
         "chroma_status": chroma_status,
+        # 前端不再写死「最大 20MB」这类数字：上限是会随机型调整的配置，
+        # 写死在前端就会出现「界面说 20MB、后端其实收 50MB」的假信息。
+        # 这里把真实生效值暴露出来，前端读它来显示与预校验。
+        "max_upload_mb": s.max_upload_mb,
+        "ingest_max_chunks": s.ingest_max_chunks,
     }
 
 
@@ -221,11 +231,36 @@ def clear_history(session_id: str) -> dict:
 
 
 # ---------------------------------------------------------------- 前端
-# 纯静态三件套，挂到 /ui。必须放在所有 API 路由之后注册，
-# 否则 "/" 挂载会抢先匹配掉 API 路径。
-_STATIC_DIR = Path(__file__).parent / "static"
-if _STATIC_DIR.is_dir():
-    app.mount("/ui", StaticFiles(directory=str(_STATIC_DIR), html=True), name="ui")
-    logger.info("前端已挂载: /ui  (目录 %s)", _STATIC_DIR)
+# 静态前端挂到 /ui。必须放在所有 API 路由之后注册，
+# 否则挂载会抢先匹配掉 API 路径。
+#
+# 目录解析顺序（2026-10-07 起）：
+#   1) settings.frontend_dir  —— compose 把宿主机 ./frontend 只读挂到这里，是常态路径
+#   2) 包内 app/static        —— 仅在不开容器、直接 uvicorn 起服务时兜底
+# 两条都要求目录里真的有 index.html，否则判定为「没前端」并明确报错，
+# 而不是挂上一个空目录、让浏览器收到一堆 404 却不知道哪里错了。
+def _resolve_frontend_dir() -> Path:
+    s = get_settings()
+    for candidate in (Path(s.frontend_dir), Path(__file__).parent / "static"):
+        if (candidate / "index.html").is_file():
+            return candidate
+    return Path(s.frontend_dir)
+
+
+_FRONTEND_DIR = _resolve_frontend_dir()
+
+if (_FRONTEND_DIR / "index.html").is_file():
+    # html=True 让 /ui/ 自动返回 index.html
+    app.mount("/ui", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="ui")
+
+    @app.get("/", include_in_schema=False)
+    def _root() -> RedirectResponse:
+        """裸访问根路径时送到前端，省掉手打 /ui/。"""
+        return RedirectResponse(url="/ui/")
+
+    logger.info("前端已挂载: /  ->  /ui/  (目录 %s)", _FRONTEND_DIR)
 else:
-    logger.warning("静态目录不存在，未挂载前端: %s", _STATIC_DIR)
+    logger.error(
+        "前端目录缺少 index.html，未挂载 /ui：%s（若用 compose，请确认已挂载 ./frontend）",
+        _FRONTEND_DIR,
+    )

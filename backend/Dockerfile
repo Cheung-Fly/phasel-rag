@@ -14,9 +14,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
-# 非 root 运行
+# ★ 前端不再打进镜像（见 .dockerignore 里的 app/static）。
+#   这里只建出挂载点目录，实际内容由 compose 把宿主机 ./frontend 只读挂进来。
+#   为什么必须预先建目录：bind mount 的目标若不存在，Docker 会用 root 建一个，
+#   与「非 root 运行」的约定不一致；显式建好并授权更可控。
 RUN useradd -m -u 10001 appuser && \
-    mkdir -p /app/data/uploads && \
+    mkdir -p /app/data/uploads /app/frontend && \
     chown -R appuser:appuser /app
 USER appuser
 

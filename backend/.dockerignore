@@ -1,0 +1,22 @@
+# 构建上下文是 ./backend（见 docker-compose.yml 的 build.context）。
+#
+# 前端已改为宿主机 ./frontend 只读挂载（详见 docker-compose.yml 与 config.py），
+# 这里必须把包内的 app/static 排除掉。
+# 为什么非排不可：若不排除，镜像里会留一份「构建那一刻」的前端副本，
+# 平时被挂载遮盖看不出来，一旦挂载失效（写错路径、忘了挂）就会静默回退到
+# 这份旧文件 —— 表现为「改了前端但页面没变」，这类问题极难排查。
+# 宁可让它彻底不存在，失败时直接报缺 index.html。
+app/static/
+
+# Python 编译产物与缓存，不该进镜像
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 本地环境文件绝不进镜像（密钥在 .env，由 compose 的 env_file 注入）
+.env
+.env.*
+!.env.example

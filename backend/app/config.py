@@ -49,6 +49,23 @@ class Settings(BaseSettings):
     chunk_overlap: int = 120
     retrieval_top_k: int = 4
 
+    # ---------- HTTP 层护栏（2026-10-07 新增）----------
+    # CORS 白名单：逗号分隔的完整源，例如 https://rag.example.com
+    # 留空 = 不允许任何跨域请求。前端由本服务自带（/ui，与 API 同源），
+    # 因此留空不影响正常使用；只有要用 Vue dev server 跨域直连时才需要填。
+    # 原实现是 allow_origins=["*"]，等于任意网站都能借访客浏览器调本 API，
+    # 服务对外暴露前必须收紧。
+    cors_origins: str = ""
+
+    # 单文件上传上限（MB）。原为 20MB，是按 1 GiB 机型定死的；
+    # 容器内存上限已放宽到 4 GiB，故提升到 50MB。
+    # 也不宜更大：PDF 解析 CPU/内存双高，2 vCPU 上超大文件会烧掉 CPU 额度。
+    max_upload_mb: int = 50
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
     def memory_backend(self) -> str:
         return "redis" if self.redis_url.strip() else "inproc"
 

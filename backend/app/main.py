@@ -26,17 +26,22 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Phase 1 RAG API", version="0.2.0")
 
-# 阶段一开发期放开 CORS，方便 Vue3 dev server 直连；
-# 上线时把 allow_origins 收紧到具体域名。
+# CORS 白名单来自环境变量 CORS_ORIGINS（逗号分隔），默认留空。
+# 前端与 API 同源（/ui 由本服务托管），留空不影响正常访问；
+# 只有需要 Vue3 dev server 等跨域直连时才填具体源。
+# 安全前提：原先的 allow_origins=["*"] 会让任意网站借访客浏览器调本 API，
+# 对外暴露前必须收紧到具体域名。
+_settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_settings.cors_origin_list,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20MB：1 GiB 机器解析大 PDF 会吃满内存并烧 CPU 额度
+# 上传上限随容器内存上限一起放宽（1 GiB 机型时代是 20MB，现在默认 50MB）
+MAX_UPLOAD_BYTES = _settings.max_upload_mb * 1024 * 1024
 
 
 class AskRequest(BaseModel):

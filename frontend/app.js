@@ -19,6 +19,10 @@ let lastAsk     = null;    // 上一次的提问，用于「重新生成」
 // 每次问答的性能统计，用于「重新生成」时对比
 const metrics = { ttft: 0, total: 0, chunks: 0, chars: 0 };
 
+// 单文件上传上限（MB）。这里的 50 只是占位初值，真实值由 /health 下发 ——
+// 上限会随后端机型与配置调整，前端写死就会变成「界面说 20MB、后端其实收 50MB」的假信息。
+let maxUploadMb = 50;
+
 const $ = (id) => document.getElementById(id);
 const el = {
   messages:   $('messages'),
@@ -391,7 +395,9 @@ async function deleteDoc(docId) {
 /** 上传用 XMLHttpRequest，因为需要 upload.onprogress（fetch 没有上传进度） */
 function uploadFile(file) {
   if (!file) return;
-  if (file.size > 20 * 1024 * 1024) return toast('文件超过 20MB 限制', 'error');
+  if (file.size > maxUploadMb * 1024 * 1024) {
+    return toast(`文件超过 ${maxUploadMb}MB 限制`, 'error');
+  }
 
   el.uploadProg.hidden = false;
   el.upName.textContent = file.name;
@@ -565,14 +571,26 @@ function toggleTheme() {
   toast(next === 'light' ? '已切换为浅色' : '已切换为深色');
 }
 
+/* 上限由后端说了算：前端只负责显示与预校验。
+   注意要在判断 status 之前调用 —— 上限是配置项，
+   与 chroma 健康与否无关，后端降级时它依然有效。 */
+function applyServerLimits(d) {
+  const mb = Number(d && d.max_upload_mb);
+  if (!mb) return;
+  maxUploadMb = mb;
+  const hint = $('dzHint');
+  if (hint) hint.textContent = `.md / .txt / .pdf · 最大 ${mb}MB`;
+}
+
 async function checkHealth() {
   try {
     const r = await fetch('/health');
     const d = await r.json();
+    applyServerLimits(d);
     if (d.status === 'ok') {
       el.health.innerHTML =
         `<span class="dot dot-ok"></span><span>${MD.esc(d.llm_model)}</span>` +
-        `<span class="mem-tag" title="记忆后端：inproc 表示容器重启后会丢失">${MD.esc(d.memory_backend)}</span>`;
+        `<span class="mem-tag" title="记忆/存储后端：会话永久存档在 PostgreSQL，Redis 只作热缓存">${MD.esc(d.memory_backend)}</span>`;
     } else {
       el.health.innerHTML = `<span class="dot dot-err"></span><span>异常</span>`;
     }

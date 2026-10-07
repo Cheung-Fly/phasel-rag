@@ -9,10 +9,18 @@
 #    2) 单进程持有 sqlite，多开 worker 就会写冲突，等于把并发能力永久锁死在 1。
 #  现拆成 api / chroma / redis / postgres 四个容器，各自独立限额与生命周期。
 #
+#  【2026-10-07 架构调整三：前端从镜像里剥离】
+#  前端原先由 COPY 打进 api 镜像，改一行 CSS 也要重建镜像，且容易出现
+#  「改了没生效」（跑的是旧层）。现在改为：
+#    - 常驻：宿主机 ./frontend 只读挂到 api 容器的 /app/frontend，改文件即时生效；
+#    - 可选：profile=nginx 时再起一个 rag-frontend 容器，独占静态文件与反向代理。
+#  两种方式共用同一份 ./frontend 目录，因此永远不会出现两套前端不一致。
+#
 #  内存预算（总 7.7 GiB，系统常驻约 0.9 GiB）：
 #      api 2g + chroma 1.5g + postgres 1g + redis 512m = 5.0 GiB
 #      留约 1.8 GiB 余量给系统与突发，正常不会触发 swap。
 #      注意 limit 是「上限」不是「预留」，实际常驻远低于此。
+#      （可选）frontend 额外 128m，启用后仍留约 1.7 GiB 余量。
 #
 #  CPU：仍是 2 vCPU / 40% 基线。四容器空闲时几乎不吃 CPU，
 #       但依旧禁止任何容器无谓空转（空转同样消耗 credit）。
@@ -43,6 +51,10 @@ services:
       # 只挂上传目录。向量数据已迁到 chroma 容器（见 ./data/chroma-server），
       # API 不再接触 chroma 文件 —— 职责边界更清楚，也避免两边同时写一份数据。
       - ./data/uploads:/app/data/uploads
+      # ★ 前端独立挂载（2026-10-07）：只读挂进来，改前端不必重建镜像。
+      #   :ro 是刻意的 —— API 进程没有任何理由写前端文件，多一个写权限
+      #   就多一条「被入侵后篡改页面」的路径。
+      - ./frontend:/app/frontend:ro
     depends_on:
       chroma:
         condition: service_healthy
@@ -197,6 +209,58 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------ 前端（可选，默认不启动）
+  # 启用：docker compose --profile nginx up -d
+  # 停用：docker compose --profile nginx stop frontend
+  #
+  # 为什么默认不启动：当前访问方式是 SSH 隧道直连 api 的 127.0.0.1:8000，
+  # 而 api 自己就能把 /ui 发出去。凭空多一个常驻容器只会多占内存与一个攻击面。
+  #
+  # 什么时候该启动：
+  #   1) 前端要独立发版（换 Vue3 构建产物、加 CDN 前缀），不想让它拴在 API 上；
+  #   2) 需要 nginx 这层能力 —— gzip、静态缓存头、将来在这台机器上终止 TLS。
+  #
+  # 与 api 的关系：两者只读共享同一份 ./frontend 目录，所以不存在「两套前端」
+  # 不一致的问题；nginx 又把 /api、/health 反代回同一个 api 容器，
+  # 因此浏览器视角仍是同源，依旧不需要配 CORS_ORIGINS。
+  #
+  # 为什么用 nginx-unprivileged 而不是 nginx:alpine：
+  # 官方 nginx 镜像以 root 启动 master 进程（为了绑 80 端口、写 /var/run），
+  # 与本机「容器一律非 root」的约定冲突。unprivileged 变体以 uid 101 运行、
+  # 默认监听 8080，无需任何额外权限即可工作。
+  frontend:
+    image: nginxinc/nginx-unprivileged:1.27-alpine
+    container_name: rag-frontend
+    restart: unless-stopped
+    profiles: ["nginx"]
+    ports:
+      # 与 api 一样只绑本机：公网入口依旧交给 SSH 隧道。
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # 同一份前端目录，只读。改宿主机文件即时生效，无需重建任何镜像。
+      - ./frontend:/usr/share/nginx/html:ro
+      # 站点配置单独放 ./deploy，与前端产物分开：
+      # 前端升级时一般只动 html/js/css，不该连 nginx 配置一起被覆盖。
+      - ./deploy/nginx-frontend.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+    # 纯静态 + 反代，128m 非常宽裕（实测常驻约 6-10 MiB）
+    mem_limit: 128m
+    memswap_limit: 192m
+    healthcheck:
+      # alpine 基础镜像自带 busybox wget，直接发一个真实 HTTP 请求，
+      # 比探端口可靠：nginx 进程活着但配置写坏时，端口照样在听。
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     logging:
       driver: json-file
       options:

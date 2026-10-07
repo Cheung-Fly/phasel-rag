@@ -514,3 +514,148 @@ docker compose up -d --build
 | Chroma 认证 | 目前无鉴权，仅靠端口只绑本机 + 容器网络隔离。若将来跨机访问需开 token |
 | 并发入库 | 当前串行（名额 1）。若将来要并发，正确做法是引入任务队列 + 状态查询接口，而不是调大名额 |
 | 会话长期价值 | 存档已进 PG。若要让 Agent 跨会话检索历史对话（长期记忆），下一步是给 messages 加 pgvector 向量列 |
+
+---
+
+# 第四次变更：前端从镜像剥离，独立挂载（2026-10-07 晚）
+
+## 1. 动机
+
+前端 6 个文件（`index.html` / `app.js` / `style.css` / `markdown.js` / `sse.js` / `store.js`，共 1800 行）
+原先被 `COPY app ./app` 打进 api 镜像。由此产生两个问题：
+
+1. **改一行样式也要重建镜像**。重建约 30 秒，且必须重启 api 容器，问答服务短暂中断。
+2. **「改了没生效」的幽灵问题**。容器跑的是几小时前构建的那一层，人在宿主机改文件、
+   镜像里还是旧的，现象极难定位 —— 容易误判为浏览器缓存或代码写错。
+
+同时，阶段二计划把前端换成 Vue3 构建产物，届时若前端仍焊在 API 镜像里，
+前端发版将被迫与后端发版耦合。
+
+## 2. 改动清单
+
+| 项 | 改动 | 原因 |
+|---|---|---|
+| 目录 | 前端迁到仓库顶层 `frontend/`，从 `backend/app/static/` 移除 | 前端成为独立可替换单元 |
+| 挂载 | api 容器新增 `./frontend:/app/frontend:ro` | 改宿主机文件即时生效，无需重建镜像 |
+| 配置 | `config.py` 新增 `frontend_dir`（默认 `/app/frontend`） | 目录可配；回退到包内 `app/static` 以支持不开容器直接跑 uvicorn |
+| 代码 | `main.py` 改为按 `frontend_dir` 解析，并要求目录内确有 `index.html`；新增 `/` → `/ui/` 跳转 | 缺前端时明确报错，而不是挂个空目录让浏览器收一堆 404 |
+| 构建 | 新增 `backend/.dockerignore`，排除 `app/static/` | ★ 见下方「关键取舍」第 1 条 |
+| 构建 | `Dockerfile` 预建 `/app/frontend` 空目录 | bind mount 目标若不存在，Docker 会以 root 创建，与非 root 约定冲突 |
+| 编排 | 新增可选服务 `frontend`（`profiles: ["nginx"]`） | 前端可独立成服务、独立发版；默认不启用，不改变现有访问方式 |
+| 编排 | 新增 `deploy/nginx-frontend.conf` | 站点配置与前端产物分离，前端升级不会覆盖 nginx 配置 |
+| 前端 | `index.html` 上传提示、`app.js` 体积预校验改为从 `/health` 读取 `max_upload_mb` | 原写死 20MB 与后端实际的 50MB 不符，属界面假信息 |
+| 前端 | `app.js` 记忆后端提示语、`store.js` 注释更新 | 原文描述的是 `inproc` 时代的行为，已过时 |
+| 接口 | `/health` 新增 `max_upload_mb`、`ingest_max_chunks` | 让前端能显示真实生效值，而非各自写死 |
+
+## 3. 关键取舍（为什么这么做）
+
+1. **必须用 `.dockerignore` 把 `app/static` 从镜像里彻底去掉，不能只靠挂载遮盖。**
+   如果镜像里留着一份旧副本，挂载正常时看不出来，一旦挂载失效（路径写错、忘了挂）
+   就会**静默回退到旧文件**，表现为「改了前端但页面没变」。宁可让它根本不存在，
+   失败时直接报「缺少 index.html」。实测确认：新镜像内 `/app/app/` 只剩 `.py` 文件。
+
+2. **挂载用 `:ro`（只读）而不是可写。** API 进程没有任何理由写前端文件，
+   多一个写权限就多一条「被入侵后篡改页面」的路径。实测 `touch /app/frontend/x`
+   返回 `Read-only file system`。
+
+3. **nginx 用 `nginxinc/nginx-unprivileged:1.27-alpine`，不用 `nginx:alpine`。**
+   官方 nginx 镜像以 root 启动 master（为了绑 80 端口、写 `/var/run`），
+   与本机「容器一律非 root」的约定冲突。unprivileged 变体以 uid 101 运行、默认监听 8080。
+   实测 `id` 输出 `uid=101(nginx)`。
+
+4. **nginx 的反代地址必须写成「变量 + resolver」，不能写死 `proxy_pass http://api:8000`。**
+   写死时 nginx 只在**启动那一刻**解析一次并把 IP 永久记住；而 api 容器被重建
+   （换镜像、改环境变量都会触发）后会拿到新 IP，nginx 却仍往旧 IP 打，
+   表现为 502，且重启 api 怎么都不好、只有重启 nginx 才行 —— 这类问题极难排查。
+   改用 `resolver 127.0.0.11 valid=10s` + `set $api_upstream http://api:8000`
+   后每次请求最多缓存 10 秒。
+
+   附带一个易错点：`proxy_pass` 用变量时 nginx **不会**自动补上「去掉 location 前缀后的
+   剩余路径」，必须显式写 `proxy_pass $api_upstream$request_uri`，
+   否则所有 `/api/*` 都会被打到上游的 `/` 上。
+
+5. **SSE 必须关掉 nginx 缓冲。** nginx 默认把上游响应攒进缓冲区再整块发出，
+   逐字输出会被攒成一大坨一次性吐出，前端全程无输出、最后突然出现整段答案。
+   因此 `/api/` 下显式 `proxy_buffering off`，并把读写超时提到 300 秒
+   （入库要串行调 120 次 embedding，可达 1~3 分钟，默认 60 秒会在后端还在干活时就掐断连接）。
+
+6. **nginx 服务放进 profile 而非默认启动。** 当前访问方式是 SSH 隧道直连 api 的 8000，
+   api 自己就能发 `/ui`。凭空多一个常驻容器只会多占内存与一个攻击面。
+   需要前端独立发版、或要用 nginx 的 gzip / 静态缓存 / 将来的 TLS 终止时再启用。
+   **本机当前已启用**（`docker compose --profile nginx up -d`），
+   停用：`docker compose --profile nginx stop frontend`。
+
+7. **根路径加了 `/` → `/ui/` 的 307 跳转。** 纯属易用性：省掉手打 `/ui/`。
+   注册在静态挂载之前，不会与挂载抢路径。
+
+## 4. 验收（全部实测）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | `/ui/` 首页 | HTTP 200 / text/html / 3682 B |
+| 2 | 根路径跳转 | `GET /` → HTTP 307，`Location: /ui/` |
+| 3 | 6 个静态资源 | 全部 HTTP 200（index/app/style/markdown/sse/store） |
+| 4 | 镜像内无旧前端 | `/app/app/static` → No such file or directory |
+| 5 | 容器内不可写前端 | `touch /app/frontend/x` → Read-only file system |
+| 6 | **热更新（核心）** | 宿主机给 index.html 追加一行注释 → 服务端立即返回新内容，全程未重建任何镜像 |
+| 7 | `/health` 新字段 | `max_upload_mb=50`、`ingest_max_chunks=1200`、`memory_backend=postgres+redis` |
+| 8 | nginx 首页 | HTTP 200，返回的是 index.html |
+| 9 | nginx gzip | `style.css` 15665 B → 5361 B（`Content-Encoding: gzip`） |
+| 10 | nginx 反代 | `/api/documents`、`/health`、`/docs`、`/openapi.json` 全部 200 |
+| 11 | nginx 上传 | 经反代上传成功（`chunks=1`），验证 `client_max_body_size` 与反代上传链路 |
+| 12 | **SSE 未缓冲（核心）** | 经 nginx 的流式问答：160 个 token 事件跨越 13.62 秒逐条到达，`Transfer-Encoding: chunked` |
+| 13 | **nginx 动态解析（核心）** | api 容器名称一度消失后又恢复，nginx **未重启**，在 10 秒内自行恢复为 200 |
+| 14 | 端到端问答 | 经 8080 提问成都东软学院校训，命中并带来源；`/health` = `postgres+redis` |
+| 15 | 知识库未被污染 | 上传验证文档已删除，uploads 目录只剩 `4271c477f93f.md` |
+
+最终容器状态（5 个全部 healthy）：
+
+```
+rag-frontend   Up (healthy)   127.0.0.1:8080->8080/tcp
+rag-api        Up (healthy)   127.0.0.1:8000->8000/tcp
+rag-chroma     Up (healthy)   127.0.0.1:8001->8000/tcp
+rag-postgres   Up (healthy)   127.0.0.1:5432->5432/tcp
+rag-redis      Up (healthy)   127.0.0.1:6379->6379/tcp
+```
+
+内存实测：frontend 3.2 MiB / api 115 MiB / chroma 30 MiB / postgres 36 MiB / redis 3.9 MiB，
+合计约 188 MiB —— 上限是上限，实际常驻远低于此。
+
+## 5. 执行中踩到的坑（如实记录）
+
+1. **`docker network connect` 不会带上 compose 的服务别名。**
+   为验证 nginx 的动态解析，我用「断开 + 重连网络」的方式想给 api 换 IP，
+   结果 `Aliases` 变成空、`api` 这个域名解析不到了，nginx 侧立刻 502。
+   这不是配置问题，是我的测试操作副作用：compose 会给容器打上
+   `[容器名, 服务名]` 两个别名，手写的 `docker network connect` 只给容器名。
+   改用 `docker compose up -d --force-recreate api` 恢复后，nginx 在 10 秒内自愈。
+   **这个插曲反而真正验证了 resolver 方案的价值**：nginx 全程未重启，域名消失又恢复后能自己接上；
+   若当初写死了 `proxy_pass http://api:8000`，它会一直往旧 IP 打、不会自愈。
+
+2. **api 容器重建时 Docker 常常复用同一个 IP。**
+   所以「重建容器看 IP 有没有变」并不能验证动态解析 —— 我第一次和第二次重建，
+   IP 都是 `172.18.0.5`。要真验证必须让容器名称短暂不可解析（即上面那次）。
+
+3. **前端里有 3 处与后端实况不符的写死值**，是这次顺手修的：
+   上传提示「最大 20MB」（实际 50MB）、`app.js` 里 `file.size > 20 * 1024 * 1024` 的预校验、
+   `store.js` 里描述 `memory_backend = inproc` 的注释。
+   教训：凡是会随后端配置变化的数字，前端都不该写死，应由 `/health` 下发。
+
+## 6. 回滚
+
+| 目标 | 操作 |
+|---|---|
+| 回滚 api 镜像 | `docker tag phase1-rag-api:0.1.0-backup-pre-frontend phase1-rag-api:0.1.0 && docker compose up -d --force-recreate api` |
+| 回滚代码 | 改动前代码在 `data/_backup_20261007/pre-frontend-deploy-182648/` |
+| 回滚前端原位置 | 原始 `backend/app/static/` 在 `data/_backup_20261007/pre-frontend/static-backup/` |
+| 停用 nginx 前端 | `docker compose --profile nginx stop frontend` |
+| 完全回到「前端在镜像里」 | 把 `frontend/` 拷回 `backend/app/static/`、删掉 `backend/.dockerignore` 里那行、去掉 compose 的 `./frontend` 挂载，重建镜像 |
+
+## 7. 更新的访问方式
+
+| 入口 | 地址 | 用途 |
+|---|---|---|
+| api 直连（原有，仍可用） | `ssh -L 8000:127.0.0.1:8000 azureuser@20.89.90.58` → `http://localhost:8000/ui/` | 日常调试；`/` 会自动跳到 `/ui/` |
+| nginx 前端（新增，需启用 profile） | `ssh -L 8080:127.0.0.1:8080 azureuser@20.89.90.58` → `http://localhost:8080/` | 带 gzip 的正式前端入口 |
+
+两个入口都是只绑 `127.0.0.1`，公网依旧不可达。

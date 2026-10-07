@@ -2,13 +2,24 @@
 #  阶段一 RAG 服务 — Azure Standard_B2as_v2 专用编排
 #  目标机：2 vCPU / 8 GiB RAM（AMD EPYC 7763，CPU 基线 40%，累积 48 credits/小时）
 #
-#  两条硬约束（2026-10-07 按实况重定）：
-#   1) 机型已由 B2ts_v2(2 vCPU / 1 GiB) 升级为 B2as_v2(2 vCPU / 8 GiB)
-#      → 容器内存上限同步放宽到 4 GiB，避免大文档/并发被无谓 OOM Kill
-#   2) CPU 基线由 20% 提升到 40%，但仍非无限 → 依旧禁止无谓的 CPU 空转
+#  【2026-10-07 架构调整二：单容器 → 四容器】
+#  此前是「单容器 + 嵌入式 Chroma」，那是 1 GiB 机型的产物。机型升到 8 GiB 后，
+#  它的两个硬伤开始显现：
+#    1) 向量索引与 API 抢同一份内存，且无法单独限额 —— 文档一多，API 内存跟着涨；
+#    2) 单进程持有 sqlite，多开 worker 就会写冲突，等于把并发能力永久锁死在 1。
+#  现拆成 api / chroma / redis / postgres 四个容器，各自独立限额与生命周期。
+#
+#  内存预算（总 7.7 GiB，系统常驻约 0.9 GiB）：
+#      api 2g + chroma 1.5g + postgres 1g + redis 512m = 5.0 GiB
+#      留约 1.8 GiB 余量给系统与突发，正常不会触发 swap。
+#      注意 limit 是「上限」不是「预留」，实际常驻远低于此。
+#
+#  CPU：仍是 2 vCPU / 40% 基线。四容器空闲时几乎不吃 CPU，
+#       但依旧禁止任何容器无谓空转（空转同样消耗 credit）。
 # ============================================================
 
 services:
+  # ------------------------------------------------------------ 应用
   api:
     build:
       context: ./backend
@@ -29,16 +40,22 @@ services:
       # 直接暴露 0.0.0.0 等于把 API Key 挂到公网上。
       - "127.0.0.1:8000:8000"
     volumes:
-      # 持久化目录：容器重建不丢知识库
-      - ./data/chroma:/app/data/chroma
+      # 只挂上传目录。向量数据已迁到 chroma 容器（见 ./data/chroma-server），
+      # API 不再接触 chroma 文件 —— 职责边界更清楚，也避免两边同时写一份数据。
       - ./data/uploads:/app/data/uploads
-    # ---- 内存护栏（2026-10-07 按 8 GiB 实况重定）----
-    # 原值 600m / 1600m 是 1 GiB 机型时代的"保命配置"：系统常驻约 250MB，
-    # 只剩 600MB 给业务，稍大的 PDF 解析或并发问答就会被 OOM Kill（exit 137）。
-    # 现在给业务 4 GiB（约占机器一半），swap 仅作极端兜底；
-    # swappiness 已由 60 下调到 10，避免热页被换出后检索延迟抖动。
-    mem_limit: 4g
-    memswap_limit: 5g
+    depends_on:
+      chroma:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    # ---- 内存护栏 ----
+    # 由 4g 下调到 2g：向量索引（原先最占内存的部分）已迁出本进程，
+    # 现在这里只剩 FastAPI + 文件解析，2 GiB 有充足余量；
+    # 省下的内存分给 chroma / postgres。
+    mem_limit: 2g
+    memswap_limit: 2560m
     environment:
       - PYTHONUNBUFFERED=1
       # 2 vCPU → 给 2 线程；在 2 vCPU 上超配线程只会增加上下文切换开销
@@ -49,12 +66,137 @@ services:
       # HTTP 层护栏：跨域白名单（留空=仅同源）；单文件上传上限(MB)
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-50}
+      # 入库护栏：真正卡住工作量的是切片数，不是文件体积（见 config.py 注释）
+      - INGEST_MAX_CHARS=${INGEST_MAX_CHARS:-2000000}
+      - INGEST_MAX_CHUNKS=${INGEST_MAX_CHUNKS:-1200}
+      - INGEST_MAX_CONCURRENT=${INGEST_MAX_CONCURRENT:-1}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 5
       start_period: 60s
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------ 向量库
+  chroma:
+    # 版本必须与 API 镜像里的 chromadb 客户端库严格一致（当前 1.5.9）。
+    # Chroma 1.x 要求客户端与服务端主版本匹配，错配会直接抛 API 版本错误。
+    image: chromadb/chroma:1.5.9
+    container_name: rag-chroma
+    restart: unless-stopped
+    environment:
+      - IS_PERSISTENT=TRUE
+      # 匿名遥测：关掉。既省一次外网请求，也不把使用数据送出去。
+      - ANONYMIZED_TELEMETRY=FALSE
+      - PERSIST_DIRECTORY=/data
+    volumes:
+      # 由旧目录 ./data/chroma 迁移而来（保留了原 sqlite 与 HNSW 索引文件）。
+      # 旧目录继续留在原地当冷备份，不删。
+      - ./data/chroma-server:/data
+    ports:
+      # 只映射到本机便于调试；容器间通信走 compose 内网，不依赖这个映射。
+      - "127.0.0.1:8001:8000"
+    mem_limit: 1500m
+    memswap_limit: 2g
+    healthcheck:
+      # Chroma 1.x 的心跳端点是 /api/v2/heartbeat（0.5.x 的 /api/v1 现在返回 410）。
+      # ★ 该官方镜像非常精简：没有 curl / wget / python / nc，常规 HTTP 客户端都用不了，
+      #   但自带 bash —— 所以用 bash 的 /dev/tcp 直接发一个 HTTP/1.0 请求，
+      #   再校验状态行里含 "200"。
+      #   为什么不止探端口：进程活着但内部异常时端口照样 LISTEN，探端口会漏报。
+      test:
+        - CMD
+        - bash
+        - -c
+        - 'exec 3<>/dev/tcp/127.0.0.1/8000 && printf "GET /api/v2/heartbeat HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n" >&3 && head -1 <&3 | grep -q " 200 "'
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------ 会话热缓存
+  redis:
+    image: redis:7-alpine
+    container_name: rag-redis
+    restart: unless-stopped
+    # 只作热缓存，所以用 allkeys-lru + 上限：缓存写满时自动淘汰最久未用的会话，
+    # 不会像默认的 noeviction 那样在写满时直接报错。
+    # 淘汰在这里是无损的 —— 真相源在 PostgreSQL，缓存随时可以丢。
+    # AOF 仍开启：缓存虽可丢，但有它就能在 PG 短暂不可用时也不掉数据。
+    # 未设 requirepass：端口只绑 127.0.0.1，且 compose 内网对外隔离。
+    # 若将来把端口暴露到内网其他机器，必须补上 requirepass 并同步改 REDIS_URL。
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 384mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - "300 100"
+    volumes:
+      - ./data/redis:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    mem_limit: 512m
+    memswap_limit: 640m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------ 会话存档（真相源）
+  postgres:
+    image: postgres:16-alpine
+    container_name: rag-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-ragdb}
+      - POSTGRES_USER=${POSTGRES_USER:-rag}
+      # 密码从 .env 读；:? 表示"没设置就直接让 compose 报错停住"，
+      # 避免用一个空/默认密码悄悄把库跑起来。
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须在 .env 中设置}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    ports:
+      # 只绑本机。日常无需连接；要用 psql 进去看数据时走 127.0.0.1:5432。
+      - "127.0.0.1:5432:5432"
+    # 单用户场景把资源收窄：默认 max_connections=100 会预留大量内存，
+    # shared_buffers 默认只有 128MB 也偏小 —— 一收一放更贴合本机负载。
+    command:
+      - postgres
+      - -c
+      - max_connections=40
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - work_mem=8MB
+    mem_limit: 1g
+    memswap_limit: 1280m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-rag} -d $${POSTGRES_DB:-ragdb}"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     logging:
       driver: json-file
       options:

@@ -67,6 +67,8 @@ def get_embeddings() -> Embeddings:
         # 关闭 tiktoken 预分词：百炼是中文模型，用 OpenAI 的 tokenizer
         # 估算长度既不准也没必要，关掉可省一次 CPU 开销。
         check_embedding_ctx_length=False,
-        max_retries=2,
-        timeout=60,
+        # 超时/重试改为配置项：入库是批量串行调用，超时值直接决定
+        # 「一份文档最多可能挂多久」，不该写死在代码里。
+        max_retries=s.embedding_max_retries,
+        timeout=s.embedding_timeout_seconds,
     )

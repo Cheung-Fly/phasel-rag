@@ -9,22 +9,28 @@ python-multipart>=0.0.9
 pydantic>=2.7,<3
 pydantic-settings>=2.3,<3
 
-# RAG orchestration + vector store
+# RAG orchestration + vector store（Chroma 走 HTTP 客户端连独立服务）
 langchain>=0.3,<2
 langchain-core>=0.3,<2
 langchain-community>=0.3,<2
 langchain-text-splitters>=0.3,<2
 langchain-chroma>=0.2,<2
-chromadb>=0.5,<2
+chromadb>=1.5,<2
 
-# Document parsers
-pypdf>=4.2
+# ★ 直接依赖必须显式声明（2026-10-07 补齐）
+# 下面两个包代码里是直接 import 的（llm.py 用 langchain_openai，rag.py 用 pypdf），
+# 但此前从未写进本文件 —— 旧镜像里它们只是被 langchain-community 的传递依赖
+# "顺带"装上的。重建镜像时传递依赖变了，两个包一起消失，接口直接 500。
+# 教训：凡是代码里 import 的包，就必须在这里出现，不能靠别人带。
+langchain-openai>=1.0,<2
+pypdf>=6,<7
 
-# LLM + Embedding：阿里百炼（OpenAI 兼容），阶段三的 llama.cpp 也用它
-langchain-openai>=0.2,<2
-
-# Redis 对话记忆（Upstash 走 TLS，redis-py 自带支持）
+# 会话热缓存：Redis（2026-10-07 接入）
+# 原先是"可选依赖"——redis 包没装在镜像里，memory.py 永远走进程内降级，
+# Redis 分支从来没被真正执行过。现在 Redis 是本机容器，成为常规路径，必须显式声明。
 redis>=5,<7
 
-# 观测
-httpx>=0.27
+# 会话存档：PostgreSQL 真相源（2026-10-07 接入）
+# 用 psycopg3 而不是 psycopg2：原生提供预编译 wheel，无需编译工具链；
+# [pool] 附带线程安全连接池，适配 FastAPI 的线程池执行模型。
+psycopg[binary,pool]>=3.2,<4

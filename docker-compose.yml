@@ -12,17 +12,23 @@
 #  【2026-10-07 架构调整三：前端从镜像里剥离】
 #  前端原先由 COPY 打进 api 镜像，改一行 CSS 也要重建镜像，且容易出现
 #  「改了没生效」（跑的是旧层）。现在改为：
-#    - 常驻：宿主机 ./frontend 只读挂到 api 容器的 /app/frontend，改文件即时生效；
-#    - 可选：profile=nginx 时再起一个 rag-frontend 容器，独占静态文件与反向代理。
-#  两种方式共用同一份 ./frontend 目录，因此永远不会出现两套前端不一致。
+#    - 宿主机 ./frontend 只读挂到 api 容器的 /app/frontend，改文件即时生效；
+#    - 独立的 frontend 容器（nginx）独占静态文件与反向代理。
+#  两者共用同一份 ./frontend 目录，因此永远不会出现两套前端不一致。
+#
+#  【2026-10-07 架构调整四：前端改为默认常驻】
+#  frontend 起初挂在 profiles: ["nginx"] 下（可选启用）。实践下来这个「可选」
+#  是多余的：它是唯一的访问入口，忘了带 --profile 就整个站点不可用，
+#  而 compose 对此既不报错也不提示，只是静默地少起一个容器。
+#  现已去掉 profile，docker compose up -d 一条命令即拉起全部五个容器。
 #
 #  内存预算（总 7.7 GiB，系统常驻约 0.9 GiB）：
-#      api 2g + chroma 1.5g + postgres 1g + redis 512m = 5.0 GiB
-#      留约 1.8 GiB 余量给系统与突发，正常不会触发 swap。
-#      注意 limit 是「上限」不是「预留」，实际常驻远低于此。
-#      （可选）frontend 额外 128m，启用后仍留约 1.7 GiB 余量。
+#      api 2g + chroma 1.5g + postgres 1g + redis 512m + frontend 128m = 5.125 GiB
+#      留约 1.7 GiB 余量给系统与突发，正常不会触发 swap。
+#      注意 limit 是「上限」不是「预留」，实际常驻远低于此
+#      （frontend 纯静态 + 反代，实测常驻仅 6-10 MiB）。
 #
-#  CPU：仍是 2 vCPU / 40% 基线。四容器空闲时几乎不吃 CPU，
+#  CPU：仍是 2 vCPU / 40% 基线。五容器空闲时几乎不吃 CPU，
 #       但依旧禁止任何容器无谓空转（空转同样消耗 credit）。
 # ============================================================
 
@@ -215,20 +221,27 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # ------------------------------------------------------------ 前端（可选，默认不启动）
-  # 启用：docker compose --profile nginx up -d
-  # 停用：docker compose --profile nginx stop frontend
+  # ------------------------------------------------------------ 前端（默认常驻）
+  # 启动/停止方式与其他服务完全一致，不再需要 --profile：
+  #     全部起：      docker compose up -d
+  #     只起前端：    docker compose up -d frontend
+  #     停前端：      docker compose stop frontend
+  #     改完配置热载：docker compose exec frontend nginx -s reload
   #
-  # 为什么默认不启动：当前访问方式是 SSH 隧道直连 api 的 127.0.0.1:8000，
-  # 而 api 自己就能把 /ui 发出去。凭空多一个常驻容器只会多占内存与一个攻击面。
+  # 为什么它必须常驻：这是唯一的正式访问入口（127.0.0.1:8080，公网经 SSH 隧道）。
+  # 早先把它放进 profile 当「可选服务」，结果是不带 --profile 就起不来，
+  # 而 compose 对此不报错、只是静默少起一个容器 —— 省下的 6 MiB 内存，
+  # 远远抵不上一次「站点打不开但容器看着都正常」的排查成本。
   #
-  # 什么时候该启动：
-  #   1) 前端要独立发版（换 Vue3 构建产物、加 CDN 前缀），不想让它拴在 API 上；
-  #   2) 需要 nginx 这层能力 —— gzip、静态缓存头、将来在这台机器上终止 TLS。
+  # 它提供什么：
+  #   1) 静态产物独立于 API 发布（换前端文件不必碰 api 镜像与生命周期）；
+  #   2) nginx 这层能力 —— gzip、静态缓存头、将来在这台机器上终止 TLS。
   #
   # 与 api 的关系：两者只读共享同一份 ./frontend 目录，所以不存在「两套前端」
   # 不一致的问题；nginx 又把 /api、/health 反代回同一个 api 容器，
   # 因此浏览器视角仍是同源，依旧不需要配 CORS_ORIGINS。
+  # 保留兜底路径：api 自己仍能直接从 /ui/ 提供前端（同源），
+  # 8080 出问题时可用 8000 对照，快速判断是前端故障还是后端故障。
   #
   # 为什么用 nginx-unprivileged 而不是 nginx:alpine：
   # 官方 nginx 镜像以 root 启动 master 进程（为了绑 80 端口、写 /var/run），
@@ -238,7 +251,6 @@ services:
     image: nginxinc/nginx-unprivileged:1.27-alpine
     container_name: rag-frontend
     restart: unless-stopped
-    profiles: ["nginx"]
     ports:
       # 与 api 一样只绑本机：公网入口依旧交给 SSH 隧道。
       - "127.0.0.1:8080:8080"

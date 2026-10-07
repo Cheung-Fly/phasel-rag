@@ -541,7 +541,7 @@ docker compose up -d --build
 | 代码 | `main.py` 改为按 `frontend_dir` 解析，并要求目录内确有 `index.html`；新增 `/` → `/ui/` 跳转 | 缺前端时明确报错，而不是挂个空目录让浏览器收一堆 404 |
 | 构建 | 新增 `backend/.dockerignore`，排除 `app/static/` | ★ 见下方「关键取舍」第 1 条 |
 | 构建 | `Dockerfile` 预建 `/app/frontend` 空目录 | bind mount 目标若不存在，Docker 会以 root 创建，与非 root 约定冲突 |
-| 编排 | 新增可选服务 `frontend`（`profiles: ["nginx"]`） | 前端可独立成服务、独立发版；默认不启用，不改变现有访问方式 |
+| 编排 | 新增 `frontend` 服务（初版为 `profiles: ["nginx"]`，**第五次变更已改为默认常驻**） | 前端可独立成服务、独立发版 |
 | 编排 | 新增 `deploy/nginx-frontend.conf` | 站点配置与前端产物分离，前端升级不会覆盖 nginx 配置 |
 | 前端 | `index.html` 上传提示、`app.js` 体积预校验改为从 `/health` 读取 `max_upload_mb` | 原写死 20MB 与后端实际的 50MB 不符，属界面假信息 |
 | 前端 | `app.js` 记忆后端提示语、`store.js` 注释更新 | 原文描述的是 `inproc` 时代的行为，已过时 |
@@ -579,11 +579,10 @@ docker compose up -d --build
    因此 `/api/` 下显式 `proxy_buffering off`，并把读写超时提到 300 秒
    （入库要串行调 120 次 embedding，可达 1~3 分钟，默认 60 秒会在后端还在干活时就掐断连接）。
 
-6. **nginx 服务放进 profile 而非默认启动。** 当前访问方式是 SSH 隧道直连 api 的 8000，
-   api 自己就能发 `/ui`。凭空多一个常驻容器只会多占内存与一个攻击面。
-   需要前端独立发版、或要用 nginx 的 gzip / 静态缓存 / 将来的 TLS 终止时再启用。
-   **本机当前已启用**（`docker compose --profile nginx up -d`），
-   停用：`docker compose --profile nginx stop frontend`。
+6. **nginx 服务起初放进 profile 而非默认启动 —— 这个决定后来被推翻了（见第五次变更）。**
+   当时的判断是：访问方式是 SSH 隧道直连 api 的 8000，api 自己就能发 `/ui`，
+   凭空多一个常驻容器只会多占内存与一个攻击面。
+   实际用过才发现这个「可选」有害无益，第五次变更已去掉 profile 改为默认常驻。
 
 7. **根路径加了 `/` → `/ui/` 的 307 跳转。** 纯属易用性：省掉手打 `/ui/`。
    注册在静态挂载之前，不会与挂载抢路径。
@@ -648,14 +647,134 @@ rag-redis      Up (healthy)   127.0.0.1:6379->6379/tcp
 | 回滚 api 镜像 | `docker tag phase1-rag-api:0.1.0-backup-pre-frontend phase1-rag-api:0.1.0 && docker compose up -d --force-recreate api` |
 | 回滚代码 | 改动前代码在 `data/_backup_20261007/pre-frontend-deploy-182648/` |
 | 回滚前端原位置 | 原始 `backend/app/static/` 在 `data/_backup_20261007/pre-frontend/static-backup/` |
-| 停用 nginx 前端 | `docker compose --profile nginx stop frontend` |
+| 停用 nginx 前端 | `docker compose stop frontend`（第五次变更后不再需要 `--profile`） |
+| 退回「前端可选」旧行为 | 在 `frontend` 服务下加回一行 `profiles: ["nginx"]`，再 `docker compose up -d`（不推荐，见第五次变更） |
 | 完全回到「前端在镜像里」 | 把 `frontend/` 拷回 `backend/app/static/`、删掉 `backend/.dockerignore` 里那行、去掉 compose 的 `./frontend` 挂载，重建镜像 |
 
 ## 7. 更新的访问方式
 
 | 入口 | 地址 | 用途 |
 |---|---|---|
-| api 直连（原有，仍可用） | `ssh -L 8000:127.0.0.1:8000 azureuser@20.89.90.58` → `http://localhost:8000/ui/` | 日常调试；`/` 会自动跳到 `/ui/` |
-| nginx 前端（新增，需启用 profile） | `ssh -L 8080:127.0.0.1:8080 azureuser@20.89.90.58` → `http://localhost:8080/` | 带 gzip 的正式前端入口 |
+| api 直连（保留为兜底） | `ssh -L 8000:127.0.0.1:8000 azureuser@20.89.90.58` → `http://localhost:8000/ui/` | 排查用：8080 打不开时用它判断是前端还是后端的锅；`/` 会自动跳到 `/ui/` |
+| nginx 前端（**默认入口，随栈常驻**） | `ssh -L 8080:127.0.0.1:8080 azureuser@20.89.90.58` → `http://localhost:8080/` | 带 gzip 的正式入口，`docker compose up -d` 会自动拉起，无需 `--profile` |
 
 两个入口都是只绑 `127.0.0.1`，公网依旧不可达。
+
+---
+
+# 第五次变更：前端改为默认常驻（去掉 profile，2026-10-07 晚）
+
+## 1. 一句话
+
+把 `frontend` 服务上的 `profiles: ["nginx"]` 删掉，其余一律不动。
+`docker compose up -d` 从此一条命令拉起全部五个容器。
+
+**改动只有一行**：`docker-compose.yml` 里删掉 `profiles: ["nginx"]`（另加注释修订）。
+
+## 2. 为什么要推翻第四次的决定
+
+第四次把 nginx 前端放进 profile 当「可选服务」，理由是「api 自己也能发 `/ui`，
+多一个常驻容器只是多占内存与攻击面」。这个判断错在**把两件事混为一谈**：
+
+| | 事实 |
+|---|---|
+| 我以为 | 8080 是「锦上添花」的第二个入口，8000 才是主入口 |
+| 实际 | 8080 是唯一正式入口；8000 只是排查用的兜底 |
+
+一旦定位成「主入口」，profile 就从「省资源」变成了「藏地雷」：
+
+1. **失败是静默的。** 忘带 `--profile nginx` 时 compose 不报错、不警告，
+   只是少起一个容器 —— `docker compose ps` 看着四个容器全绿，
+   但站点打不开。这种「一切正常但就是不通」最难排查。
+2. **省下的东西微不足道。** 实测 frontend 常驻 **3.08 MiB**。
+   为了 3 MiB 让主入口默认不启动，是一笔亏本买卖。
+3. **命令记忆负担。** 起全栈、重启、看日志、跑 compose 配置检查……
+   每条命令都得额外记着带 `--profile nginx`，漏一次就是一次故障。
+4. **它并没有真正「可选」。** 既然每次都得启用，那它就不是可选项，
+   只是给默认行为加了一道容易忘的手续。
+
+结论：**「可选」只适用于「不用也无所谓」的东西。主入口不属于这一类。**
+
+## 3. 改动清单
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| compose 服务定义 | `frontend` 带 `profiles: ["nginx"]` | 删掉该行 |
+| 启动命令 | `docker compose --profile nginx up -d` | `docker compose up -d` |
+| `docker compose config --services` | 输出 4 个服务 | 输出 5 个服务 |
+| 镜像 / 挂载 / 端口 / 限额 | — | **完全未动** |
+
+镜像仍是 `nginxinc/nginx-unprivileged:1.27-alpine`，端口仍是 `127.0.0.1:8080`，
+挂载仍是 `./frontend` 与 `./deploy/nginx-frontend.conf`（均只读），限额仍是 128m。
+
+## 4. 一个有用的副作用
+
+旧命令 `docker compose --profile nginx up -d` **不会报错**，
+它退化成与裸命令完全等价（因为没有服务声明该 profile 了，
+compose 只是照常按默认集合启动）。所以历史文档、脚本、脑子里的肌肉记忆
+都不会突然失效 —— 这次改动是向前兼容的。
+
+## 5. 验收（全部实测）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | `docker compose config --quiet` | 通过，无语法错误 |
+| 2 | `docker compose config --services`（不带 profile） | `postgres redis chroma api frontend` —— 5 个全在 |
+| 3 | **删掉前端容器后跑裸命令** | `docker compose rm -sf frontend` → 8080 变 `HTTP 000` → `docker compose up -d` → `rag-frontend Created/Started` |
+| 4 | 前端健康 | 21 秒后 `Up (healthy)` |
+| 5 | 首页 | HTTP 200 / text/html / 3682 B |
+| 6 | gzip | 响应头带 `Content-Encoding: gzip` |
+| 7 | 反代 `/health` | `memory_backend=postgres+redis`、`vector_store=chroma://chroma:8000`、`chroma_status=ok` |
+| 8 | 反代 `/api/documents` | HTTP 200 |
+| 9 | 5 个静态资源 | app.js / style.css / markdown.js / sse.js / store.js 全部 200 |
+| 10 | **SSE 未被缓冲（核心）** | `Transfer-Encoding: chunked`；9 个事件（meta/sources/token×6/done），首事件 0.03s、末事件 1.32s，**跨度 1.30s** |
+| 11 | 端到端问答 | "成都东软学院的校训是：精勤博学，学以致用 [来源1]"，命中 4 个来源 |
+| 12 | 单独起前端 | `docker compose up -d frontend` 正常 |
+| 13 | 单独重启前端 | `docker compose restart frontend` 正常 |
+| 14 | **前后端解耦（核心）** | `docker compose stop frontend` 后 api 的 `/health` 仍 200；`start frontend` 后 8080 恢复 200 |
+| 15 | 旧命令兼容 | `docker compose --profile nginx up -d` 不报错，行为与裸命令一致 |
+
+内存实测（五容器合计约 **197 MiB**，上限合计 5.125 GiB）：
+
+```
+rag-frontend   3.082MiB / 128MiB     2.41%
+rag-api        124.6MiB / 2GiB       6.09%
+rag-chroma     30.14MiB / 1.465GiB   2.01%
+rag-postgres   35.34MiB / 1GiB       3.45%
+rag-redis      3.875MiB / 512MiB     0.76%
+
+系统：used 943 MiB / 7932 MiB，swap 占用 0
+```
+
+frontend 的 3 MiB 就是这次决策的全部代价 —— 用这点内存换掉一个静默故障点，
+很划算。
+
+## 6. 执行中值得记一笔的细节
+
+1. **改完 compose 后 `docker compose up -d` 并没有重建前端容器**（仍显示 `Up 42 minutes`）。
+   说明 `profiles` 字段不参与容器的 config-hash 计算，改动对运行中的容器无影响 ——
+   本次调整**零停机**。
+2. **为了真实验证，我特意把容器删掉重来**（`docker compose rm -sf frontend`），
+   而不是只跑一次 `up -d` 看一眼。因为「容器本来就在跑」时，
+   `up -d` 成功并不能证明新配置有效 —— 它可能只是复用了旧容器。
+   必须先让前端**不存在**，再验证裸命令能把它拉起来。
+3. `docker compose config --services` 是这个改动的**最小验证手段**：
+   它直接列出「默认会启动哪些服务」，不带任何副作用，比 `up -d` 试错安全得多。
+
+## 7. 回滚
+
+| 目标 | 操作 |
+|---|---|
+| 回到「可选 profile」 | 在 `frontend` 服务下加回一行 `profiles: ["nginx"]`，`docker compose up -d` |
+| 回到改前文件 | 备份在 `data/_backup_20261007/docker-compose.yml.pre-unprofile`（或 `~/docker-compose.yml.pre-unprofile`） |
+| 完全不要前端容器 | `docker compose stop frontend`（api 的 `/ui/` 仍可访问，前端不会消失） |
+
+## 8. 日常命令（改后版）
+
+| 目的 | 命令 |
+|---|---|
+| 起/更新全栈 | `docker compose up -d` |
+| 只看前端 | `docker compose up -d frontend` / `docker compose restart frontend` / `docker compose stop frontend` |
+| 改完 nginx 配置热载 | `docker compose exec frontend nginx -s reload` |
+| 改前端文件 | 直接改宿主机 `./frontend/*`，**无需任何重启**（只读挂载，即时生效） |
+| 看前端日志 | `docker compose logs -f --tail=100 frontend` |

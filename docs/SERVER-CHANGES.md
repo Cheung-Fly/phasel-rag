@@ -279,3 +279,238 @@ Swap    swappiness=10，未使用
 ---
 
 *本文档由 WorkBuddy 于 2026-10-07 生成，记录了本机当日的全部配置变更。*
+
+---
+
+# 2026-10-07（第二次）架构调整：单容器 → 四容器
+
+> 承接本文件上一节。上一节解决的是「配置与实况脱节」（内存上限、日志、内核参数等），
+> 本节是一次**结构性**调整：把挤在一个容器里的三件事拆成三个独立服务。
+
+## 一、为什么改
+
+改动前是「单容器 + 嵌入式 Chroma」。这个方案不是错的，但它的前提是 1 GiB 机型 ——
+当初的原话是「多一个容器就多 200MB+ 常驻，嵌入式省掉一整个容器的开销」。
+机型升到 **Standard_B2as_v2（2 vCPU / 8 GiB）** 后，前提不再成立，
+而嵌入式方案的代价开始显现：
+
+| 代价 | 具体表现 |
+|---|---|
+| 内存与 API 绑死 | HNSW 索引、sqlite 连接、chunk 缓存全在 API 进程内，文档一多 API 内存就涨，且**无法单独限额** |
+| 并发被锁死在 1 worker | 多开 uvicorn worker 会各自打开同一份 sqlite，写冲突风险高 → 等于永久放弃水平并发 |
+| 备份/升级不独立 | 向量库是 API 的一个"副作用"，没法单独快照、单独升级 |
+| 阻碍阶段二 | Agent 需要多进程/多工具共享同一向量库，嵌入式做不到 |
+
+另一条线是会话记忆：此前 `REDIS_URL` 留空 → 走进程内降级 → **容器一重启对话就没了**，
+且 `redis` 包根本没装进镜像，Redis 分支从未真正执行过。
+
+## 二、改成什么
+
+```
+                    ┌──────────────────────────┐
+                    │  rag-api  (FastAPI)      │
+                    │  mem_limit 2g            │
+                    │  只留业务逻辑与文件解析     │
+                    └───┬──────────┬───────────┘
+              HTTP:8000 │          │
+        ┌───────────────┘          └───────────────┐
+        ▼                                          ▼
+┌──────────────────┐  RESP          ┌──────────────────────────┐
+│ rag-chroma       │◀───┐           │ rag-redis                │
+│ chromadb/chroma  │    │           │ redis:7-alpine           │
+│ 1.5.9            │    │           │ 512m / allkeys-lru / AOF │
+│ 1.5g             │    │           │ = 会话热缓存（可丢）        │
+│ 向量库（持久化）   │    │           └──────────────────────────┘
+└──────────────────┘    │
+                        │  SQL
+                        │  ┌──────────────────────────┐
+                        └──│ rag-postgres             │
+                           │ postgres:16-alpine       │
+                           │ 1g / shared_buffers 256M │
+                           │ = 会话真相源（不可丢）     │
+                           └──────────────────────────┘
+```
+
+内存预算（上限，非预留）合计 5.0 GiB，系统常驻约 0.9 GiB，总 7.7 GiB 下留约 1.8 GiB 余量。
+
+| 容器 | 镜像 | mem_limit | 实测常驻 |
+|---|---|---|---|
+| rag-api | phase1-rag-api:0.1.0（自建） | 2g | 123 MiB |
+| rag-chroma | chromadb/chroma:**1.5.9** | 1500m | 30 MiB |
+| rag-postgres | postgres:16-alpine | 1g | 34 MiB |
+| rag-redis | redis:7-alpine | 512m | 4 MiB |
+
+> 版本必须对齐：API 里的 chromadb 客户端是 **1.5.9**，服务端镜像也用 1.5.9。
+> Chroma 1.x 要求客户端与服务端主版本一致，错配会直接抛 API 版本错误。
+
+## 三、为什么这么设计（关键取舍）
+
+### 1. 会话存储：为什么不是「近期写 Redis、长期写 PG」
+
+最初的想法是"热数据进 Redis、冷数据进 PG"。但这个说法有个隐含缺陷：**它把两者当成了
+两个并列的数据源**，于是变成双写 —— 两边都可能失败，且没有权威副本，不一致时不知道该信谁。
+
+实际采用的是**先定真相源，再让缓存派生**：
+
+```
+写入：先落 PostgreSQL（真相源）→ 再刷 Redis（缓存）
+       PG 成功而 Redis 失败，只损失一点性能；反过来则会直接丢数据。
+读取：Redis 命中即返回；未命中 → 从 PG 重建并回填缓存（cache-aside）
+删除：PG 删（messages 走外键级联）+ Redis 删 + 进程内清
+列表：从 PG 查（真相源），Redis 仅作兜底
+```
+
+分层职责因此变得明确：**Redis 里的一切都可以丢**，丢了下次读取自动从 PG 回填。
+`INGEST`/`MEMORY_TTL_SECONDS`(7天) 只影响缓存，不影响 PG 里的永久存档。
+
+降级链（任何一层挂掉服务都可用）：
+
+```
+PostgreSQL + Redis  →  仅 PG（无缓存，稍慢）  →  仅 Redis（无持久化）  →  进程内
+```
+
+### 2. 为什么改用本机 Redis 而不是 Upstash
+
+原实现假设 Upstash 托管 Redis（公网 + TLS，有额度与延迟成本）。
+既然这台 VM 已经有 8 GiB 内存，把 Redis 跑成本机容器更划算：
+延迟从公网往返降到容器内网，且完全免费。`memory.py` 仍兼容 `redis://` 与 `rediss://`。
+
+Redis 用 `allkeys-lru` + 384MB 上限：缓存写满时自动淘汰最久未用的会话，
+而不是像默认 `noeviction` 那样直接报错。淘汰在这里无损（真相源在 PG）。
+
+### 3. 入库闸门：从「文件体积」改到「工作量」
+
+上一节的事故（22MB 文本被切成 33002 片、疯狂调 embedding、打挂健康检查）根因是
+**闸门设错了维度**：`MAX_UPLOAD_MB` 拦的是文件体积，而决定成本与负载的是**切片数量**，
+两者并不成正比。现在改为三道闸：
+
+| 配置 | 默认值 | 作用与依据 |
+|---|---|---|
+| `INGEST_MAX_CHARS` | 2,000,000 | 解析后字符数。约等价 3000 片；在切片**之前**拦下明显过大的文件，省掉一次全量切片 |
+| `INGEST_MAX_CHUNKS` | 1200 | 切片数硬上限。1200 片 = 120 次 embedding 调用（每批 10 行），按每次 0.5~1.5s 约 1~3 分钟 —— 已是交互能忍受的上限；再大应转后台队列（阶段二） |
+| `INGEST_MAX_CONCURRENT` | 1 | 同时入库数。2 vCPU 上并行入库只会互相抢 CPU 并触发云端限流，串行更快更稳。用**非阻塞获取 + 明确报错**，而不是让第二个请求无限等待 |
+
+报错信息会直接告诉用户"会被切成 N 片、约需 M 次 embedding 调用"，而不是一句笼统的"失败"。
+
+### 4. 上传接口必须丢线程池
+
+`rag.ingest` 是同步函数，一次入库要串行发起上百次 embedding 请求。
+原先 `async def upload` 里直接同步调用它会**阻塞整个事件循环** ——
+期间 `/health` 和别人的问答全部卡住，容器还会被健康检查判定为不健康。
+现在改为 `await run_in_threadpool(rag.ingest, ...)`。
+
+## 四、数据迁移：向量库怎么搬的
+
+嵌入式与独立服务用的是**同一套持久化格式**（`chroma.sqlite3` + 一个 HNSW 索引目录），
+所以迁移就是复制目录：
+
+```bash
+mkdir -p data/chroma-server
+cp -a data/chroma/. data/chroma-server/
+```
+
+挂给 chroma 容器（`./data/chroma-server:/data`），**旧目录 `./data/chroma` 原地保留作冷备份**。
+
+风险其实极低：当前知识库只有 1 份文档、4 个向量，最坏情况重新上传一次就恢复。
+迁移后实测 `count = 4`，文档列表与问答均正常，无需重灌。
+
+## 五、执行中遇到的问题与处置
+
+### 1. Chroma 容器健康检查失败（unhealthy）
+
+现象：`dependency failed to start: container rag-chroma is unhealthy`。
+排查：`docker inspect` 显示 `exec: "python": executable file not found in $PATH`。
+
+原因：**chromadb/chroma 官方镜像非常精简**，没有 `curl` / `wget` / `python` / `nc`，
+只有 `bash`、`perl`、`awk`、`grep` 等基础工具。原先照抄 API 容器的 `python -c` 写法不成立。
+
+处置：改用 bash 的 `/dev/tcp` 直接发 HTTP 请求并校验状态行：
+
+```yaml
+test:
+  - CMD
+  - bash
+  - -c
+  - 'exec 3<>/dev/tcp/127.0.0.1/8000 && printf "GET /api/v2/heartbeat HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n" >&3 && head -1 <&3 | grep -q " 200 "'
+```
+
+顺带纠正一个端点认知：Chroma 1.x 的心跳是 `/api/v2/heartbeat`（返回 200），
+`/api/v1/heartbeat` 现在返回 **410**。
+
+### 2. 重建镜像后接口 500 —— 依赖声明缺失
+
+现象：`/api/documents` 报 `ModuleNotFoundError: No module named 'langchain_openai'`。
+全面排查后发现 **`langchain-openai` 和 `pypdf` 两个包根本没写进 requirements.txt**，
+而它们是 `llm.py` / `rag.py` **直接 import** 的。
+
+旧镜像之所以能跑，是因为它们被 `langchain-community` 的传递依赖"顺带"装上了；
+重建镜像时依赖解析结果变化，两个包一起消失，接口立刻挂掉。
+
+处置：在 requirements.txt 里显式声明
+
+```
+langchain-openai>=1.0,<2
+pypdf>=6,<7
+```
+
+并在文件里写下这条规则：**凡是代码里 import 的包，就必须在 requirements 里出现，不能靠别人带。**
+
+### 3. 顺手修掉：删除文档不删原始文件
+
+排查时发现 `uploads/` 里存在"孤儿文件" —— 删除文档只删了向量，落盘的原文一直留着，
+每删一次就多一个永远不会被引用的文件。已修：`delete_document` 现在用 glob 匹配
+`{doc_id}.*` 一并删除，让 uploads 始终与知识库一致。
+
+（`ingest` 失败时也会清理刚落盘的文件，避免同类垃圾。）
+
+## 六、验收结果（全部实测通过）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | 四容器状态 | 全部 `Up (healthy)` |
+| 2 | `/health` | `status=ok`、`memory_backend=postgres+redis`、`chroma_status=ok` |
+| 3 | 向量数据迁移 | collection `phase1_docs`、`count = 4`，文档列表正确 |
+| 4 | 端到端问答 | 命中「张应辉 / 精勤博学，学以致用」「2003 年 / 软件工程」，带 `[来源N]` |
+| 5 | 多轮记忆 | 第二轮「它有多少在校生？」正确理解指代 |
+| 6 | **PG 落库** | `sessions` 1 行、`messages` 4 行（user/assistant 逐条） |
+| 7 | **Redis 缓存** | key 存在、TTL 604800 |
+| 8 | **缓存回填**（关键） | 手动 `DEL` 缓存后读历史 → 仍返回 2 轮，且缓存被自动重建 |
+| 9 | **容器重启不丢会话** | `docker restart rag-api` 后历史仍为 2 轮 |
+| 10 | 入库闸门 A（字符） | 2,100,000 字符 → `HTTP 400` + 可读原因 |
+| 11 | 入库闸门 B（切片） | 1,462 片 → `HTTP 400`「约需 147 次 embedding 调用」 |
+| 12 | 闸门不误伤 | 正常文件 → `HTTP 200`，4 chunks |
+| 13 | 删除一致性 | 向量与落盘原文一并清除，uploads 无孤儿 |
+| 14 | CORS | 外站 Origin 拿不到 ACAO 头 |
+| 15 | 端口暴露面 | 8000/8001/6379/5432 **全部只绑 127.0.0.1** |
+| 16 | 日志上限 | 四个容器全部继承 `max-size=10m, max-file=3` |
+| 17 | 备份 | pg_dump + 向量/原文归档均非空，cron 每日 03:00 |
+
+## 七、回滚方式
+
+```bash
+cd ~/phase1-rag
+
+# 1) 代码与编排：改动前完整快照（含 app 全部源码、compose、chroma 数据副本）
+ls data/_backup_20261007/pre-fanout/
+
+# 2) 镜像回滚点
+docker image ls | grep backup-20261007     # phase1-rag-api:0.1.0-backup-20261007
+
+# 3) 若需退回单容器嵌入式方案
+cp data/_backup_20261007/pre-fanout/docker-compose.yml .
+cp -a data/_backup_20261007/pre-fanout/app-backup/. backend/app/
+docker compose up -d --build
+
+# 4) 数据层不受影响：旧向量目录 data/chroma 一直原地保留，
+#    PostgreSQL / Redis 的卷目录删掉即可（会话存档需先确认是否要留）
+```
+
+## 八、遗留待办
+
+| 项 | 说明 |
+|---|---|
+| 异地备份 | 备份与源数据同盘，防不了整机丢失。建议 cron 后追加一步推到 Azure Blob |
+| Azure 成本告警 | B2as_v2 会消耗学生额度，需在门户对 CPU Credits / Cost Budget 设告警 |
+| Chroma 认证 | 目前无鉴权，仅靠端口只绑本机 + 容器网络隔离。若将来跨机访问需开 token |
+| 并发入库 | 当前串行（名额 1）。若将来要并发，正确做法是引入任务队列 + 状态查询接口，而不是调大名额 |
+| 会话长期价值 | 存档已进 PG。若要让 Agent 跨会话检索历史对话（长期记忆），下一步是给 messages 加 pgvector 向量列 |

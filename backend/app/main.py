@@ -5,6 +5,11 @@
   - 问答：普通（一次性返回）+ 流式（SSE 逐字返回）
   - 记忆：查询 / 清空
   - 前端：挂载在 /ui（纯 HTML/CSS/JS 三件套）
+
+存储拓扑（2026-10-07 起）：
+    本进程只负责业务逻辑，三种数据各自独立成服务 ——
+    向量 → 独立 Chroma 容器；会话存档 → PostgreSQL（真相源）；
+    会话热缓存 → Redis。本进程挂了，数据一条都不会丢。
 """
 import json
 import logging
@@ -16,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from . import rag
 from .config import get_settings
@@ -40,7 +46,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 上传上限随容器内存上限一起放宽（1 GiB 机型时代是 20MB，现在默认 50MB）
+# 上传上限：第一道粗筛，只拦「文件体积」。
+# 真正决定 embedding 成本与容器负载的是「切片数」，由 rag.ingest 里的两道闸门负责
+# （见 config.py 中 ingest_max_chars / ingest_max_chunks 的说明）。
 MAX_UPLOAD_BYTES = _settings.max_upload_mb * 1024 * 1024
 
 
@@ -50,15 +58,40 @@ class AskRequest(BaseModel):
 
 
 # ---------------------------------------------------------------- 基础
+def _probe_chroma(s) -> str:
+    """实时探测独立的 Chroma 服务。
+
+    为什么要主动探一次向量库：vectorstore 是懒加载的 —— 只有真的上传或检索时
+    才会建立连接。也就是说，主机名写错这类配置问题在"第一次使用"之前完全静默，
+    /health 却一直报 ok。这里用 2 秒超时探一次，把问题暴露在健康检查里。
+    """
+    import urllib.request
+
+    url = f"http://{s.chroma_host}:{s.chroma_port}/api/v2/heartbeat"
+    try:
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            return "ok" if resp.status == 200 else f"http {resp.status}"
+    except Exception as exc:
+        return f"unreachable ({type(exc).__name__})"
+
+
 @app.get("/health", tags=["基础"], summary="健康检查")
 def health() -> dict:
     s = get_settings()
+    chroma_status = _probe_chroma(s)
     return {
-        "status": "ok",
+        # 向量库不可达时降级为 degraded：API 进程本身还能响应，
+        # 但知识库功能已经不可用，不该报 ok。
+        "status": "ok" if chroma_status == "ok" else "degraded",
         "llm_provider": s.llm_provider,
         "llm_model": s.llm_model,
         "embedding_model": s.embedding_model,
-        "memory_backend": s.memory_backend(),
+        # 由 MemoryStore 自报【运行态】而非读配置：原先 health 直接返回
+        # 配置里有没有填 REDIS_URL，结果是"填了但 redis 包没装"时照样报 redis，
+        # 属于谎报。现在只有真的 ping 通才会出现在这里。
+        "memory_backend": get_memory().backend_summary(),
+        "vector_store": f"chroma://{s.chroma_host}:{s.chroma_port}",
+        "chroma_status": chroma_status,
     }
 
 
@@ -71,8 +104,16 @@ async def upload(file: UploadFile = File(...)) -> dict:
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024}MB 限制")
     try:
-        return rag.ingest(data, file.filename or "unnamed.txt")
+        # ★ 必须丢到线程池执行，不能直接调用。
+        # rag.ingest 是同步函数，入库一份文档要串行发起上百次 embedding 请求
+        # （每批限 10 行）。直接在 async 路由里同步调用会阻塞整个事件循环 ——
+        # 期间所有接口（包括 /health 和其他人的问答）都会卡住，容器还会因此
+        # 被健康检查判定为不健康。run_in_threadpool 是 Starlette 官方提供的
+        # 处理同步代码的标准做法。
+        return await run_in_threadpool(rag.ingest, data, file.filename or "unnamed.txt")
     except ValueError as exc:
+        # 业务校验失败（类型不支持 / 超出字符或切片上限 / 已有任务在跑）
+        # → 400，把可读原因原样告诉用户
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:
         logger.exception("ingest failed")
@@ -157,8 +198,8 @@ def chat_stream(req: AskRequest, request: Request) -> StreamingResponse:
 def sessions() -> dict:
     """给前端做会话列表用。
 
-    注意：会话数据只是对话记忆。当前的 inproc 后端在容器重启后会清空，
-    所以这个列表是「进程生命周期内」的。
+    数据源是 PostgreSQL（真相源），所以容器重启、Redis 缓存过期都不会丢。
+    只有 PostgreSQL 不可用时才会退回 Redis / 进程内，那时这个列表才是临时的。
     """
     return {"sessions": get_memory().list_sessions()}
 

@@ -9,27 +9,41 @@
 #    2) 单进程持有 sqlite，多开 worker 就会写冲突，等于把并发能力永久锁死在 1。
 #  现拆成 api / chroma / redis / postgres 四个容器，各自独立限额与生命周期。
 #
-#  【2026-10-07 架构调整三：前端从镜像里剥离】
+#  【2026-10-07 架构调整三：前端从 api 镜像里剥离】
 #  前端原先由 COPY 打进 api 镜像，改一行 CSS 也要重建镜像，且容易出现
-#  「改了没生效」（跑的是旧层）。现在改为：
-#    - 宿主机 ./frontend 只读挂到 api 容器的 /app/frontend，改文件即时生效；
-#    - 独立的 frontend 容器（nginx）独占静态文件与反向代理。
-#  两者共用同一份 ./frontend 目录，因此永远不会出现两套前端不一致。
+#  「改了没生效」（跑的是旧层）。
 #
-#  【2026-10-07 架构调整四：前端改为默认常驻】
+#  【2026-10-07 架构调整四：前端服务默认常驻】
 #  frontend 起初挂在 profiles: ["nginx"] 下（可选启用）。实践下来这个「可选」
 #  是多余的：它是唯一的访问入口，忘了带 --profile 就整个站点不可用，
 #  而 compose 对此既不报错也不提示，只是静默地少起一个容器。
-#  现已去掉 profile，docker compose up -d 一条命令即拉起全部五个容器。
+#
+#  【2026-10-07 架构调整五：前端迁到 Vue3 + Vite，前后端彻底分家】
+#  上一步只把前端「搬出镜像」，但它仍是一堆手写的 .js 直接挂载目录 ——
+#  没有构建步骤，也就没有压缩、没有内容哈希、没有模块化。本次改为：
+#    - frontend/ 是一个独立的 Vue3 + Vite 工程，有自己的 package.json；
+#    - frontend 服务改为 build（多阶段：node 构建 → nginx 托管 dist），
+#      产物打在镜像里，不再挂载宿主机目录；
+#    - api 服务不再挂载 ./frontend，也不再挂载 /ui —— 它退化成纯接口服务。
+#  于是两个进程真正独立：改前端不碰 API 镜像，API 升级不影响页面能否打开，
+#  哪怕 API 挂了，nginx 仍能正常发出页面（前端会显示「无法连接」）。
+#
+#  开发与生产现在是两套不同形态，这是选择构建链的必然结果：
+#    - 开发：cd frontend && npm run dev  → Vite 5173（HMR），/api 代理到 8000
+#    - 生产：docker compose up -d --build frontend → nginx 8080 托管 dist
+#  宿主机上改前端源码对容器**不再即时生效**，必须重建镜像。
 #
 #  内存预算（总 7.7 GiB，系统常驻约 0.9 GiB）：
 #      api 2g + chroma 1.5g + postgres 1g + redis 512m + frontend 128m = 5.125 GiB
 #      留约 1.7 GiB 余量给系统与突发，正常不会触发 swap。
 #      注意 limit 是「上限」不是「预留」，实际常驻远低于此
 #      （frontend 纯静态 + 反代，实测常驻仅 6-10 MiB）。
+#      注意：frontend 的**构建阶段**是临时的，不在这份预算里 ——
+#      它只在 docker build 期间存在，峰值约 300-500 MiB，构建完即释放。
 #
 #  CPU：仍是 2 vCPU / 40% 基线。五容器空闲时几乎不吃 CPU，
 #       但依旧禁止任何容器无谓空转（空转同样消耗 credit）。
+#       vite build 是一次性的几十秒 CPU 峰值，可接受。
 # ============================================================
 
 services:
@@ -57,10 +71,10 @@ services:
       # 只挂上传目录。向量数据已迁到 chroma 容器（见 ./data/chroma-server），
       # API 不再接触 chroma 文件 —— 职责边界更清楚，也避免两边同时写一份数据。
       - ./data/uploads:/app/data/uploads
-      # ★ 前端独立挂载（2026-10-07）：只读挂进来，改前端不必重建镜像。
-      #   :ro 是刻意的 —— API 进程没有任何理由写前端文件，多一个写权限
-      #   就多一条「被入侵后篡改页面」的路径。
-      - ./frontend:/app/frontend:ro
+      # ★ 2026-10-07 调整五删掉了这里原有的 ./frontend:/app/frontend:ro。
+      #   API 已不再托管任何前端（main.py 里的 /ui 挂载与 StaticFiles 一并移除），
+      #   继续挂一份前端文件进来只会让后来者以为「这里还有一条前端通路」。
+      #   保留下来的写权限也少一条 —— 少一个可写路径就少一条被篡改的入口。
     depends_on:
       chroma:
         condition: service_healthy
@@ -221,44 +235,58 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # ------------------------------------------------------------ 前端（默认常驻）
+  # ------------------------------------------------------------ 前端（Vue3 构建产物 + nginx）
   # 启动/停止方式与其他服务完全一致，不再需要 --profile：
-  #     全部起：      docker compose up -d
-  #     只起前端：    docker compose up -d frontend
-  #     停前端：      docker compose stop frontend
-  #     改完配置热载：docker compose exec frontend nginx -s reload
+  #     全部起：          docker compose up -d
+  #     只起前端：        docker compose up -d frontend
+  #     改完前端后重建：  docker compose up -d --build frontend
+  #     停前端：          docker compose stop frontend
+  #     改完 nginx 热载：  docker compose exec frontend nginx -s reload
   #
   # 为什么它必须常驻：这是唯一的正式访问入口（127.0.0.1:8080，公网经 SSH 隧道）。
   # 早先把它放进 profile 当「可选服务」，结果是不带 --profile 就起不来，
   # 而 compose 对此不报错、只是静默少起一个容器 —— 省下的 6 MiB 内存，
   # 远远抵不上一次「站点打不开但容器看着都正常」的排查成本。
   #
-  # 它提供什么：
-  #   1) 静态产物独立于 API 发布（换前端文件不必碰 api 镜像与生命周期）；
-  #   2) nginx 这层能力 —— gzip、静态缓存头、将来在这台机器上终止 TLS。
+  # ★ 为什么改成 build 而不是挂载 ./frontend：
+  #   Vue 工程必须经过构建（编译 .vue、打依赖、压缩、加内容哈希）才能上线，
+  #   挂载源码目录毫无意义 —— 浏览器不认识 .vue，也解析不了裸 import。
+  #   构建放在镜像的多阶段里完成（见 frontend/Dockerfile），好处是宿主机
+  #   不需要装 Node，构建环境随镜像版本化，换台机器结果一致。
+  #   代价必须记住：改前端源码后宿主机文件不再即时生效，必须重建镜像。
+  #   开发期的即时反馈改由 Vite dev server（npm run dev）承担。
   #
-  # 与 api 的关系：两者只读共享同一份 ./frontend 目录，所以不存在「两套前端」
-  # 不一致的问题；nginx 又把 /api、/health 反代回同一个 api 容器，
-  # 因此浏览器视角仍是同源，依旧不需要配 CORS_ORIGINS。
-  # 保留兜底路径：api 自己仍能直接从 /ui/ 提供前端（同源），
-  # 8080 出问题时可用 8000 对照，快速判断是前端故障还是后端故障。
+  # 它提供什么：
+  #   1) 静态产物独立于 API 发布（改前端只重建 frontend 镜像，不动 api）；
+  #   2) nginx 这层能力 —— gzip、静态缓存头、将来在这台机器上终止 TLS；
+  #   3) 前端与后端互为隔离：页面打不开不等于 API 挂了，反之亦然。
+  #
+  # 与 api 的关系：只通过 /api、/health 反向代理通信，没有任何共享文件。
+  # ★ 注意与调整四的区别：api 侧 /ui 兜底入口已随本次调整一并取消。
+  #   前端出问题时直接看 frontend 容器日志和 8080 的实际响应；
+  #   「8000 能不能出页面」不再是有效的对照手段 —— 那已是两个独立系统。
   #
   # 为什么用 nginx-unprivileged 而不是 nginx:alpine：
   # 官方 nginx 镜像以 root 启动 master 进程（为了绑 80 端口、写 /var/run），
   # 与本机「容器一律非 root」的约定冲突。unprivileged 变体以 uid 101 运行、
   # 默认监听 8080，无需任何额外权限即可工作。
   frontend:
-    image: nginxinc/nginx-unprivileged:1.27-alpine
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    # 显式命名并带版本号：docker images 里一眼能认出来，
+    # 也让「回滚到上一版前端」变成给 compose 改个 tag 这么简单。
+    image: phase1-rag-frontend:0.1.0
     container_name: rag-frontend
     restart: unless-stopped
     ports:
       # 与 api 一样只绑本机：公网入口依旧交给 SSH 隧道。
       - "127.0.0.1:8080:8080"
     volumes:
-      # 同一份前端目录，只读。改宿主机文件即时生效，无需重建任何镜像。
-      - ./frontend:/usr/share/nginx/html:ro
-      # 站点配置单独放 ./deploy，与前端产物分开：
-      # 前端升级时一般只动 html/js/css，不该连 nginx 配置一起被覆盖。
+      # ★ 唯一保留的挂载：站点配置。
+      #   调缓存头、加一段 location 只需改文件 + nginx -s reload，
+      #   不必为了改一行 nginx 配置而重建整个前端镜像。
+      #   前端构建产物则已打进镜像 —— 它属于某个版本，不该被本地文件覆盖。
       - ./deploy/nginx-frontend.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - api
@@ -268,6 +296,8 @@ services:
     healthcheck:
       # alpine 基础镜像自带 busybox wget，直接发一个真实 HTTP 请求，
       # 比探端口可靠：nginx 进程活着但配置写坏时，端口照样在听。
+      # 额外意义：这同时验证了「镜像里真的有构建产物」——
+      # 若 Dockerfile 的 COPY --from 写错路径，这里会立刻变成 unhealthy。
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
       interval: 30s
       timeout: 5s

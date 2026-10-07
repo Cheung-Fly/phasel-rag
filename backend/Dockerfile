@@ -14,12 +14,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
-# ★ 前端不再打进镜像（见 .dockerignore 里的 app/static）。
-#   这里只建出挂载点目录，实际内容由 compose 把宿主机 ./frontend 只读挂进来。
-#   为什么必须预先建目录：bind mount 的目标若不存在，Docker 会用 root 建一个，
-#   与「非 root 运行」的约定不一致；显式建好并授权更可控。
+# ★ 本镜像里没有任何前端代码，也不预建前端挂载点。
+#   2026-10-07 前端迁到 Vue3 + Vite 后，由独立的 frontend 镜像（nginx）
+#   托管构建产物，本容器只跑 API。
+#   历史上这里曾 COPY app/static 进镜像、后来改成预建 /app/frontend 挂载点，
+#   两次都是「API 顺带发页面」的思路。现在两个入口彻底分开：
+#   改前端不必重建本镜像，本镜像也再也无法因为挂载失效而回退到旧前端副本。
 RUN useradd -m -u 10001 appuser && \
-    mkdir -p /app/data/uploads /app/frontend && \
+    mkdir -p /app/data/uploads && \
     chown -R appuser:appuser /app
 USER appuser
 

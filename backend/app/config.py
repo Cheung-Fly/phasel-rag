@@ -56,14 +56,14 @@ class Settings(BaseSettings):
     # 上传文件落盘目录（向量数据已不在 API 这一侧）
     upload_dir: str = "/app/data/uploads"
 
-    # ---------- 前端静态目录（2026-10-07 从镜像里剥离）----------
-    # 原先前端文件被 COPY 进镜像（backend/app/static），改一行样式也要重建镜像，
-    # 而且很容易出现「改了没生效」，因为容器跑的是几小时前构建的那一层。
-    # 现在由 compose 把宿主机 ./frontend 只读挂载到容器内的这个路径，
-    # 前端因此成为可独立替换的单元：改文件即时生效；
-    # 将来换成 Vue3 构建产物（dist/）也只是替换这个目录，完全不碰 API 镜像。
-    # 回退路径是包内的 app/static（仅在不开容器、直接跑 uvicorn 时才会命中）。
-    frontend_dir: str = "/app/frontend"
+    # ---------- 前端 ----------
+    # 2026-10-07 起本服务**不再托管任何前端**。
+    # 原本这里是 frontend_dir，指向 compose 挂进来的 ./frontend，
+    # 由本进程通过 StaticFiles 挂到 /ui 发出去。前端迁到 Vue3 + Vite 后，
+    # 产物由独立的 nginx 容器托管，API 只提供接口 —— 职责切开，
+    # 改前端不必碰 API 镜像，API 出问题也不影响静态页面能否打开。
+    # 保留一个没人读的路径只会让后来者以为「这里还有一条前端通路」，
+    # 所以连同 StaticFiles 挂载一起去掉了。
 
     # ---------- 存储：会话（PG 真相源 + Redis 热缓存）----------
     # Redis  = 热缓存，可丢，丢了自动从 PG 回填
@@ -101,9 +101,13 @@ class Settings(BaseSettings):
     ingest_max_concurrent: int = 1
 
     # ---------- HTTP 层护栏 ----------
-    # CORS 白名单：逗号分隔的完整源，例如 https://rag.example.com
-    # 留空 = 不允许任何跨域请求。前端由本服务自带（/ui，与 API 同源），
-    # 因此留空不影响正常使用；只有要用 Vue dev server 跨域直连时才需要填。
+    # CORS 白名单：逗号分隔的完整源，例如 http://localhost:5173
+    # 留空 = 不允许任何跨域请求。
+    # ★ 正常情况下这里就该是空的：开发期由 Vite 的 dev server 代理
+    #   /api 转发过来（浏览器视角同源），生产期由 nginx 反向代理
+    #   （同样同源）。两边的跨域问题都在代理层解决了，不需要浏览器
+    #   层面放开。只有在「前端直连后端、中间没有代理」的特殊场景
+    #   （例如把前端部署到另一个域名）才需要在这里填白名单。
     # 原实现是 allow_origins=["*"]，等于任意网站都能借访客浏览器调本 API。
     cors_origins: str = ""
 

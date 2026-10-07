@@ -1,0 +1,22 @@
+# ★ node_modules 绝不能进构建上下文。
+#   宿主机（尤其 Windows/macOS）装出来的依赖里含平台相关的二进制
+#   （esbuild、rollup 的原生模块），拷进 alpine 容器会直接报
+#   「Exec format error」这类看不懂的错。镜像内必须重新 npm ci。
+node_modules
+
+# 上一轮的产物。构建阶段会重新生成，带进去只会让缓存失效判断变混乱。
+dist
+
+.git
+.gitignore
+.vite
+
+# 本地环境覆盖，属于开发机的东西，不该进镜像
+.env.local
+.env.*.local
+
+# 编辑器与系统垃圾
+.DS_Store
+.idea
+.vscode
+*.log

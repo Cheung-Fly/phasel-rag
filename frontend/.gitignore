@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.vite/
+*.local
+.DS_Store
+
+# 本地开发用的环境覆盖（例如 VITE_API_TARGET）
+.env.local
+.env.*.local

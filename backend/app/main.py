@@ -4,7 +4,6 @@
   - 文档管理：上传 / 列表 / 删除
   - 问答：普通（一次性返回）+ 流式（SSE 逐字返回）
   - 记忆：查询 / 清空
-  - 前端：挂载在 /ui（纯 HTML/CSS/JS 三件套，目录来自宿主机挂载）
 
 存储拓扑（2026-10-07 起）：
     本进程只负责业务逻辑，三种数据各自独立成服务 ——
@@ -12,19 +11,24 @@
     会话热缓存 → Redis。本进程挂了，数据一条都不会丢。
 
 前端拓扑（2026-10-07 起）：
-    前端文件不再打进镜像，而是宿主机 ./frontend 只读挂载到 FRONTEND_DIR。
-    因此本进程只做「把静态文件发出去」这一件事，前端可以随时被替换/升级；
-    若启用了 nginx profile，nginx 会接管静态文件与反向代理，本挂载仍可用。
+    ★ 本服务不再托管前端，一个 HTML/CSS/JS 都不发。
+    前端是独立的 Vue3 + Vite 工程（./frontend），生产环境由 nginx 容器
+    托管构建产物并把 /api、/health 反代回本服务。三点好处：
+      1) 发布解耦：换前端不必重建/重启 API 镜像，反过来 API 升级也不
+         影响静态页面能否打开（哪怕 API 挂了，页面仍能加载并显示错误）；
+      2) 职责单一：本服务只处理接口，静态文件的缓存头、gzip、TLS
+         交给擅长做这些的 nginx；
+      3) 无同源妥协：浏览器访问的一直是 nginx 那一个源，
+         不需要为了让前端调接口而放开 CORS。
+    因此导入本模块时不会再去检查任何前端目录、也不会挂载 StaticFiles。
 """
 import json
 import logging
 import uuid
-from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -38,8 +42,10 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Phase 1 RAG API", version="0.2.0")
 
 # CORS 白名单来自环境变量 CORS_ORIGINS（逗号分隔），默认留空。
-# 前端与 API 同源（/ui 由本服务托管），留空不影响正常访问；
-# 只有需要 Vue3 dev server 等跨域直连时才填具体源。
+# 留空是常态且是正确配置：开发期由 Vite dev server 把 /api 代理过来，
+# 生产期由 nginx 把 /api 反代过来 —— 两种情况下浏览器看到的都是同源，
+# 压根不会发起跨域请求。只有「前端与后端之间没有任何代理」时
+# （例如前端单独部署到另一个域名）才需要在这里填白名单。
 # 安全前提：原先的 allow_origins=["*"] 会让任意网站借访客浏览器调本 API，
 # 对外暴露前必须收紧到具体域名。
 _settings = get_settings()
@@ -230,37 +236,22 @@ def clear_history(session_id: str) -> dict:
     return {"session_id": session_id, "cleared": True}
 
 
-# ---------------------------------------------------------------- 前端
-# 静态前端挂到 /ui。必须放在所有 API 路由之后注册，
-# 否则挂载会抢先匹配掉 API 路径。
+# ---------------------------------------------------------------- 根路径
+# 这里曾经挂载过静态前端（StaticFiles 挂在 /ui，根路径 307 跳到 /ui/）。
+# 前端迁到 Vue3 + Vite、由独立 nginx 容器托管后，本服务不再发任何静态文件。
 #
-# 目录解析顺序（2026-10-07 起）：
-#   1) settings.frontend_dir  —— compose 把宿主机 ./frontend 只读挂到这里，是常态路径
-#   2) 包内 app/static        —— 仅在不开容器、直接 uvicorn 起服务时兜底
-# 两条都要求目录里真的有 index.html，否则判定为「没前端」并明确报错，
-# 而不是挂上一个空目录、让浏览器收到一堆 404 却不知道哪里错了。
-def _resolve_frontend_dir() -> Path:
-    s = get_settings()
-    for candidate in (Path(s.frontend_dir), Path(__file__).parent / "static"):
-        if (candidate / "index.html").is_file():
-            return candidate
-    return Path(s.frontend_dir)
+# 为什么根路径还要保留一个响应，而不是干脆让它 404：
+#   直接访问 127.0.0.1:8000 的人（多半是在排查问题）需要立刻知道
+#   「这是 API，不是网站 —— 页面在 nginx 那个端口上」。
+#   一个 404 会让人以为服务没起来，然后去查一堆无关的东西。
+#   返回一份自描述的 JSON 是最省事的指路牌。
+@app.get("/", include_in_schema=False)
+def root() -> dict:
+    return {
+        "service": "Phase 1 RAG API",
+        "notice": "本服务只提供接口，不托管前端页面。",
+        "frontend": "页面由独立的 nginx 容器提供（生产 8080，开发 Vite 5173）",
+        "docs": "/docs",
+        "health": "/health",
+    }
 
-
-_FRONTEND_DIR = _resolve_frontend_dir()
-
-if (_FRONTEND_DIR / "index.html").is_file():
-    # html=True 让 /ui/ 自动返回 index.html
-    app.mount("/ui", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="ui")
-
-    @app.get("/", include_in_schema=False)
-    def _root() -> RedirectResponse:
-        """裸访问根路径时送到前端，省掉手打 /ui/。"""
-        return RedirectResponse(url="/ui/")
-
-    logger.info("前端已挂载: /  ->  /ui/  (目录 %s)", _FRONTEND_DIR)
-else:
-    logger.error(
-        "前端目录缺少 index.html，未挂载 /ui：%s（若用 compose，请确认已挂载 ./frontend）",
-        _FRONTEND_DIR,
-    )

@@ -1,6 +1,18 @@
 /* ============================================================
-   私有知识库问答 — 样式
-   纯 CSS，无框架。主题通过 :root 变量切换。
+   私有知识库问答 — 全局样式
+   ------------------------------------------------------------
+   纯 CSS，无框架，也不走 scoped。主题通过 :root 变量切换。
+
+   ★ 为什么样式不拆进各个 .vue 组件：
+     这套配色与布局是一个整体 —— 变量定义、窄屏断点、消息排版
+     彼此耦合。拆成十几份 scoped 样式后，改一个颜色要在多个文件间
+     来回找，而且 scoped 会把选择器编译成带哈希的形式，
+     与 :root[data-theme] 这种全局主题机制配合起来很别扭。
+     组件模板只负责结构，配色统一在这里管。
+
+   ★ 与迁移前的差异只有两处（都标注了「新增」）：
+     1) .dot-warn —— 区分「后端连不上」和「后端在、向量库挂了」；
+     2) 流式光标由独立元素改为 .md-body 的伪元素 —— 详见对应处注释。
    ============================================================ */
 
 /* ---------- 深色（默认） ---------- */
@@ -222,6 +234,12 @@ body { overflow: hidden; }
 .dot-ok   { background: var(--ok);  box-shadow: 0 0 6px var(--ok); }
 .dot-err  { background: var(--err); box-shadow: 0 0 6px var(--err); }
 .dot-gray { background: var(--text-faint); }
+/* 新增：degraded 状态专用。
+   后端的 /health 会区分「进程活着但向量库不可达」（status=degraded）
+   和「完全连不上」两种情况。迁移前前端把两者都显示成红色「异常/无法连接」，
+   用户分不清是自己网络的问题还是服务器的问题。用黄色单独表示降级，
+   一眼就知道「服务在、但知识库暂时不可用」。 */
+.dot-warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
 .mem-tag {
   font-size: 10px; padding: 1px 5px; border-radius: 4px;
   background: var(--bg-input); color: var(--text-faint);
@@ -390,8 +408,14 @@ body { overflow: hidden; }
   font-family: ui-monospace, Consolas, monospace;
 }
 
-/* ---------- 流式光标 ---------- */
-.cursor {
+/* ---------- 流式光标 ----------
+   ★ 迁移差异：原来光标是一个真实的 <span class="cursor">，由 JS 在
+     每次重渲染后手动 appendChild 到内容末尾。迁到 Vue 后内容交给 v-html，
+     手动往里面塞节点会和虚拟 DOM 的更新打架（Vue 重渲染时会把它抹掉）。
+   改用伪元素：它不参与 DOM diff，只要给 .md-body 加上 streaming 类
+   就会自动跟在内容后面，逻辑更简单也不会被覆盖。 */
+.md-body.streaming::after {
+  content: '';
   display: inline-block;
   width: 6px; height: 14px;
   background: var(--accent);
@@ -488,5 +512,5 @@ body { overflow: hidden; }
 /* 尊重「减少动效」的系统偏好 —— 无障碍的基本要求 */
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
-  .cursor { animation: none; }
+  .md-body.streaming::after { animation: none; }
 }

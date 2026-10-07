@@ -771,10 +771,369 @@ frontend 的 3 MiB 就是这次决策的全部代价 —— 用这点内存换�
 
 ## 8. 日常命令（改后版）
 
+> ⚠️ **本节已被第六次变更部分推翻**：下表「改前端文件」一行已失效
+> （前端不再是挂载目录，改成构建产物打进镜像）。保留原表是为了不抹掉当时的判断，
+> 请以文末《第六次变更》第 8 节的命令表为准。
+
 | 目的 | 命令 |
 |---|---|
 | 起/更新全栈 | `docker compose up -d` |
 | 只看前端 | `docker compose up -d frontend` / `docker compose restart frontend` / `docker compose stop frontend` |
 | 改完 nginx 配置热载 | `docker compose exec frontend nginx -s reload` |
-| 改前端文件 | 直接改宿主机 `./frontend/*`，**无需任何重启**（只读挂载，即时生效） |
+| ~~改前端文件~~ | ~~直接改宿主机 `./frontend/*`，无需任何重启~~（第六次变更后已失效） |
 | 看前端日志 | `docker compose logs -f --tail=100 frontend` |
+
+
+---
+
+# 第六次变更：前端迁到 Vue3 + Vite，前后端彻底分家（2026-10-07 深夜）
+
+## 1. 一句话
+
+把 `frontend/` 从「一堆手写 .js 直接挂载」改为**独立的 Vue3 + Vite 工程**；
+`frontend` 服务改成多阶段构建（node 构建 → nginx 托管 `dist/`）；
+api 侧**彻底摘掉** `StaticFiles` 挂载与 `/ui` 路径，退化为纯接口服务。
+
+## 2. 动机：上一版解决了「发布」，没解决「工程」
+
+第五次变更让前端能独立起服务了，但它仍是我手写的 6 个文件、1818 行：
+
+| 问题 | 具体表现 |
+|---|---|
+| 没有模块化 | `index.html` 用 4 条 `<script src>` 顺序加载，靠全局作用域共享；加载顺序错了就是 `undefined`，且没有任何工具能发现 |
+| 无构建步骤 | 没有压缩、没有内容哈希、没有 tree-shaking；改一行要把整包重下 |
+| 无缓存策略可言 | 文件名固定，只能 `no-cache`，等于放弃静态资源缓存 |
+| 无类型/编译期检查 | 打错一个属性名要等运行时才发现 |
+| 无 HMR | 只能整页刷新 |
+
+用户明确要求走 Vue3 + Vite 的标准形态：
+开发 `npm run dev`（5173），生产 `npm run build` → `dist` → nginx。
+**这是把「前端」当成一个正经工程来对待，而不是「后端的附属静态目录」。**
+
+## 3. 改成什么
+
+### 3.1 目录结构
+
+```
+frontend/
+├── index.html              入口 HTML（含防主题闪烁的内联脚本）
+├── vite.config.js          开发代理 + 生产构建
+├── Dockerfile              多阶段：node 构建 → nginx 托管
+├── package.json
+├── README.md
+└── src/
+    ├── main.js
+    ├── App.vue
+    ├── components/         13 个单文件组件（纯结构）
+    ├── composables/        7 个组合式函数（状态与业务逻辑）
+    ├── lib/                4 个与框架无关的工具模块
+    └── styles/main.css     全局样式（不拆 scoped，理由见文件头）
+```
+
+原 6 个文件 → 25 个源文件的映射关系：
+
+| 迁移前 | 迁移后 | 说明 |
+|---|---|---|
+| `markdown.js` | `src/lib/markdown.js` | **逻辑逐字保留**，只改成 ES module 导出 |
+| `sse.js` | `src/lib/sse.js` | 同上，两个坑（分片、汉字截断）的注释一并保留 |
+| `store.js` | `src/lib/storage.js` | localStorage 层，另新增 `fmtTime` |
+| — | `src/lib/api.js` | 新增：把所有 fetch 收拢到唯一出口 |
+| `app.js`（726 行） | `composables/` × 5 + `App.vue` + 组件 | 按职责拆解，见下 |
+| `index.html`（结构） | `App.vue` + `components/` × 13 | DOM 操作全部换成模板与响应式 |
+| `style.css` | `src/styles/main.css` | 仅 2 处改动（见 3.4） |
+
+`app.js` 的拆解方式：
+
+| 原函数 | 去向 |
+|---|---|
+| `send` / `stopGenerating` / 流式事件处理 | `composables/useChat.js` |
+| `addMessage` / `createStreamingBubble` / `renderTools` / `renderSources` | `components/MessageBubble.vue` + `SourceList.vue` |
+| `refreshDocs` / `deleteDoc` / `uploadFile` | `composables/useDocuments.js` |
+| `syncSessions` / `openSession` / `deleteSession` / `exportSession` / `renderSessionList` | `composables/useSessions.js` + `useChat.js` + `SessionList.vue` |
+| `checkHealth` / `applyServerLimits` | `composables/useHealth.js` |
+| `applyTheme` / `toggleTheme` | `composables/useTheme.js` |
+| `toast` / `scrollToBottom` / `autoGrow` | `useToast.js` / `MessageList.vue` / `ChatComposer.vue` |
+| `fmtTime` | `lib/storage.js` |
+
+### 3.2 部署形态
+
+| 项 | 改前（第五次后） | 改后 |
+|---|---|---|
+| 前端来源 | 宿主机 `./frontend` 只读挂载 | **镜像内 `dist/`**（多阶段构建产出） |
+| 前端镜像 | `nginxinc/nginx-unprivileged:1.27-alpine`（官方镜像） | `phase1-rag-frontend:0.1.0`（自建） |
+| 改前端后生效方式 | 改文件即时生效 | `docker compose up -d --build frontend` |
+| api 的前端挂载 | `./frontend:/app/frontend:ro` | **已删除** |
+| api 的 `/ui` 路由 | 存在（StaticFiles） | **已删除**（现在 404） |
+| api 的 `/` | 307 跳 `/ui/` | 返回自描述 JSON |
+| nginx 站点根 | 宿主机目录 | 镜像内 `/usr/share/nginx/html` |
+
+### 3.3 开发与生产是两套形态（必须理解）
+
+| | 开发 | 生产 |
+|---|---|---|
+| 命令 | `cd frontend && npm run dev` | `docker compose up -d --build frontend` |
+| 地址 | `http://localhost:5173` | `http://127.0.0.1:8080` |
+| 服务方 | Vite dev server（Node） | nginx（alpine） |
+| 产物 | 源码即时编译，带 HMR | `dist/` 静态文件，带内容哈希 |
+| `/api` 去向 | Vite 代理 → `127.0.0.1:8000` | nginx 反代 → `api:8000` |
+| 改代码 | 自动热更新 | **必须重建镜像** |
+
+两者**共用同一份源码**，靠 `vite.config.js` 与 `deploy/nginx-frontend.conf`
+保证行为一致。共同点是「浏览器眼里始终同源」，所以**两套都不需要配 CORS**。
+
+### 3.4 只有两处样式/行为改动（其余逐字保留）
+
+1. **新增 `.dot-warn`**：后端 `/health` 的 `status=degraded`（服务在、向量库不可达）
+   现在显示黄色「向量库不可用」，而不是和「完全连不上」一样显示红色「异常」。
+   这两种故障的处置方式完全不同，混在一起显示会误导排查方向。
+2. **流式光标改为伪元素**：原先是真实 `<span class="cursor">`，由 JS 在每次
+   重渲染后手动 `appendChild`。迁到 Vue 后内容交给 `v-html`，手动塞节点会和
+   虚拟 DOM 的更新打架。改成 `.md-body.streaming::after`，不参与 DOM diff。
+
+另有一处新增：`index.html` 里加了一段**内联主题预设脚本**，在 HTML 解析阶段
+就把 `data-theme` 打到 `<html>` 上。Vue 应用有挂载成本，不这样做的话
+深色偏好用户会先看到一帧白底再跳变。
+
+### 3.5 其余功能全部保留（逐项核对过）
+
+上传（点击 + 拖拽 + 进度条）、文档删除、会话列表（单击打开 / 双击导出 / 改名 / 删除 / 全清）、
+流式问答、停止生成、重新生成、复制（含 execCommand 降级）、引用片段折叠、
+性能统计（首字/总耗时/块数/字数）、主题三态、移动端抽屉、
+快捷键（Ctrl+K / Ctrl+/ / Esc）、自动滚动只在贴底时触发、
+消息工具条 hover 才显示、`prefers-reduced-motion` 支持。
+
+## 4. 执行中踩到的坑（如实记录）
+
+### 4.1 ★ 本机 node 无法创建子进程 —— 本地构建整条路走不通
+
+准备阶段发现 `npm install` 必然失败：
+
+```
+npm error Error: spawnSync .../node.exe EBUSY
+  at validateBinaryVersion (.../esbuild/install.js:102:28)
+```
+
+逐层排查后确认：**这台机器上 node 根本无法 spawn 任何子进程**，连
+`spawnSync('C:\\Windows\\System32\\cmd.exe', ['/c','echo ok'])` 都返回 `EBUSY`。
+把 node.exe 复制一份到别处同样失败（所以不是文件锁）。后果是：
+
+- `esbuild` 的安装脚本跑不了 → `vite` 装不上可用版本
+- `vite build` 跑不了（rollup 要 spawn esbuild）
+- `agent-browser` 也用不了（要 spawn Chromium）
+
+**应对**：本地只做「静态校验」，真实构建放到服务器容器里做。静态校验用了三样：
+
+| 手段 | 查出什么 |
+|---|---|
+| `node --check` 逐个检查 12 个 JS 模块 | 语法错误 |
+| `@vue/compiler-sfc` 编译 13 个 SFC | 模板与 `<script setup>` 编译错误 |
+| 自写脚本检查相对 import | 路径写错 / 文件不存在 |
+
+> 这三样都是**只读、不依赖子进程**的，所以在受限环境下仍可用。
+
+### 4.2 ★★ `npm ci` 报告成功，但构建时才炸（最阴的一个）
+
+首次容器内构建：
+
+```
+#10 RUN npm ci ...   ->  added 32 packages in 2s     ← 看起来完全正常
+#12 RUN npm run build
+    Error: Cannot find module '@rollup/rollup-linux-x64-musl'
+    npm has a bug related to optional dependencies (npm/cli#4828)
+```
+
+根因：`rollup 4` / `esbuild` 的**原生加速包是按平台分包的**
+（`@rollup/rollup-linux-x64-musl`、`@esbuild/linux-x64`…）。
+lock 文件是在 Windows 上生成的，那次安装不会把 Linux 的原生包写进
+lock 的包列表，于是容器里 `npm ci` 老老实实按 lock 装完、报告成功，
+但 rollup 找不到自己的原生模块 —— **错误被推迟到真正执行 `vite build` 时才出现**。
+
+这类「安装成功、构建才炸」的错最难查：看到 `added 32 packages` 会本能地
+认为依赖没问题，然后去怀疑代码。
+
+**处置**：`Dockerfile` 里**故意只 `COPY package.json`，不拷 lock**：
+
+```dockerfile
+COPY package.json ./
+RUN npm install --no-audit --no-fund
+```
+
+不拷 lock 之后，`npm install` 会在容器内按当前平台（linux/musl）重新解析，
+装的必然是正确的那一份。代价是失去严格版本锁定 ——
+本项目只有 3 个直接依赖，可以接受。
+**若将来需要可复现构建，正确做法是在 Linux 容器里生成 lock 再提交，
+而不是把 Windows 生成的 lock 拿来复用。**
+
+修完后构建输出：
+
+```
+vite v6.4.4 building for production...
+✓ 33 modules transformed.
+dist/index.html                  1.60 kB │ gzip:  1.06 kB
+dist/assets/index-BC2SVm0r.css  11.70 kB │ gzip:  3.12 kB
+dist/assets/index-znBUs3lF.js   90.12 kB │ gzip: 36.20 kB
+✓ built in 1.31s
+```
+
+### 4.3 缓存策略要跟着「有没有内容哈希」一起改
+
+原 nginx 配置对**所有** `.js/.css/.html` 一律 `no-cache`，理由是
+「文件名固定，改了就是同一个名字，不能缓存」。引入 Vite 后前提变了：
+JS/CSS 被输出到 `/assets/` 且**文件名含内容哈希**，同名文件内容永不改变，
+于是可以放心 `max-age=31536000, immutable`。
+
+新的三分法：
+
+| 路径 | 策略 | 原因 |
+|---|---|---|
+| `/`、`/index.html` | `no-cache, must-revalidate` | 文件名固定，缓存了用户就看不到新版本（而旧版对应的哈希资源可能已被删，直接白屏） |
+| `/assets/` | `public, max-age=31536000, immutable` | 内容寻址，永不过期 |
+| 图片/字体 | `public, max-age=86400` | 一般不带哈希，给一天 |
+
+同时把 `/assets/` 的 `try_files` 写成 `=404` 而不是回退到 `index.html`：
+否则请求一个不存在的 `.js` 会返回 HTML（200 + `text/html`），
+浏览器报 `Unexpected token '<'`，排查半天才发现是 404 伪装成了 200。
+
+### 4.4 api 摘掉 `/ui` 后，根路径不能留成 404
+
+`StaticFiles` 挂载和 `Path`/`RedirectResponse` 导入一并删除后，
+`GET /` 变成 404。这很糟：直接访问 8000 的人（多半在排查问题）
+会以为服务没起来。改成返回一份自描述 JSON：
+
+```json
+{"service":"Phase 1 RAG API","notice":"本服务只提供接口，不托管前端页面。",
+ "frontend":"页面由独立的 nginx 容器提供（生产 8080，开发 Vite 5173）",
+ "docs":"/docs","health":"/health"}
+```
+
+### 4.5 配置里删掉「没人读的路径」
+
+`config.py` 里的 `frontend_dir` 一并删除。理由与第二次变更时删 `chroma_dir`
+完全一样：留着一个不被任何代码读取的路径，只会让后来者以为
+「这里还有一条前端通路」，然后照着它去排查一个不存在的东西。
+
+## 5. 验收（全部实测）
+
+### 5.1 部署层
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | `docker compose config --quiet` | 通过 |
+| 2 | 服务列表 | `chroma postgres redis api frontend` 5 个 |
+| 3 | api 的 volumes | 只剩 `./data/uploads`（前端挂载已消失） |
+| 4 | frontend 构建 | `exit=0`，33 模块，1.31s |
+| 5 | api 构建 | `exit=0` |
+| 6 | 五容器状态 | 全部 `Up (healthy)` |
+| 7 | **api 容器内 `/app/frontend`** | `No such file or directory` —— 镜像里确实没有前端了 |
+
+### 5.2 静态托管与缓存
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 8 | `GET /` | HTTP 200 / text/html / 1604 B |
+| 9 | 首页内容 | 引用 `/assets/index-znBUs3lF.js` 与 `index-BC2SVm0r.css`（确为 Vite 产物） |
+| 10 | 入口页缓存头 | `Cache-Control: no-cache, must-revalidate` |
+| 11 | `/assets/*.css` 缓存头 | `public, max-age=31536000, immutable` |
+| 12 | gzip | JS 产物响应带 `Content-Encoding: gzip` |
+| 13 | 不存在的资源 | `/assets/nope.js` → **HTTP 404**（未伪装成 index.html） |
+
+### 5.3 反向代理与后端
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 14 | 经 8080 的 `/health` | `status=ok`、`memory_backend=postgres+redis`、`chroma_status=ok` |
+| 15 | 经 8080 的 `/api/documents` | HTTP 200 |
+| 16 | **api 根路径** | 返回 JSON 指路牌，`application/json`（不再是页面） |
+| 17 | **api 的 `/ui/`、`/ui/index.html`** | 均 **404**（前端入口已彻底移除） |
+
+### 5.4 功能链路
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 18 | **SSE 经 nginx 流式（核心）** | 11 个 token，首 token 1.09s、末 token 1.85s，**跨度 0.76s**，逐条到达未被缓冲 |
+| 19 | 端到端问答 | 「校训是：**精勤博学，学以致用**……位于四川省成都市 [来源1]」，命中 4 个来源 |
+| 20 | 经 8080 上传 | `{"doc_id":"722092c82f63","filename":"verify.txt","chunks":1,"chars":41}` |
+| 21 | 新文档可检索 | 提问「验收口令是什么？」→「ZQ-VERIFY-7788 [来源1]」 |
+| 22 | 删除文档 | `{"deleted_chunks":1}`，列表恢复为 1 份 |
+| 23 | 原始文件一并清理 | `data/uploads/` 无残留 |
+
+### 5.5 开发服务器（在容器里实跑验证）
+
+宿主机没有 node，于是起了一个 `node:22-alpine` 容器实跑 `npm run dev`：
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 24 | Vite 启动 | `VITE v6.4.4 ready in 478 ms`，监听 5173 |
+| 25 | 首页 | 注入了 `/@vite/client`（确认是 dev server 而非静态文件） |
+| 26 | **代理 `/health`** | 经 5173 拿到真实的 `{"status":"ok",...}` |
+| 27 | **代理 `/api/documents`** | 经 5173 拿到真实文档列表 |
+
+### 5.6 ★ 真实产物在 jsdom 中执行（31/31 通过）
+
+因为本机开不了浏览器，把容器里构建出的 bundle 下载回来，
+在 jsdom 里**真实执行**，并模拟一次完整的流式问答。
+这验证了所有「编译器查不出来、只有跑起来才会错」的地方，
+尤其是流式那段的 rAF 节流 + 响应式代理写法：
+
+```
+PASS  Vue 应用已挂载（#app 非空）  — 2198 字符
+PASS  侧栏渲染 / 对话区渲染 / 输入框渲染 / 发送按钮渲染
+PASS  品牌标题 / 子标题为「阶段一 · RAG」/ 欢迎语已显示
+PASS  文档列表已从 /api/documents 填充（成都东软学院-学校概况.md）
+PASS  文档计数为 1
+PASS  健康状态显示模型名 / 记忆后端 / 上传上限 50MB / 绿色 dot-ok
+PASS  v-model 双向绑定生效
+PASS  消息数量 = 欢迎语 + 提问 + 回答  — 实际 3
+PASS  用户消息按纯文本渲染
+PASS  助手回答已渲染 Markdown（<strong>精勤博学，学以致用</strong>）
+PASS  回答正文去掉了 Markdown 记号
+PASS  流式光标已移除（.streaming 不再存在）
+PASS  引用片段已渲染 <details> / 文件名正确 / 分数 0.7419
+PASS  工具条已出现（复制 / 重新生成）
+PASS  性能统计已渲染  — 0.04s 首字 · 0.13s 总 · 3 块 · 18 字
+PASS  会话 ID 已显示在头部 / 已写入 localStorage
+PASS  流式接口被调用过一次
+PASS  主题按钮可点击并改变图标（☀ → ☾）/ 主题已落到 <html data-theme>
+PASS  提示条已显示
+
+31/31 项通过
+```
+
+### 5.7 遗留说明
+
+- 首页 HTML 里保留了我在 `index.html` 写的教学注释（约 1 KB，gzip 后约 1 KB）。
+  它随「不缓存的入口页」每次下发。考虑到本项目是教学性质、注释本身是内容的一部分，
+  选择保留。若要精简，删掉那段注释即可，不影响功能。
+- 旧前端源码已移到 `~/legacy-frontend-20261007`，并打包备份在
+  `~/backups/legacy-frontend-20261007-194318.tar.gz`。确认无事可删。
+
+## 6. 回滚
+
+| 目标 | 操作 |
+|---|---|
+| 退回挂载式前端（第五次后的形态） | `mv ~/legacy-frontend-20261007 frontend`，再 `git revert` 本次提交并 `docker compose up -d --force-recreate api frontend` |
+| 只回滚前端镜像 | `docker compose build frontend` 前的镜像层仍在缓存中；或把 compose 的 `image` 改回 `nginxinc/nginx-unprivileged:1.27-alpine` 并恢复挂载 |
+| 前端出问题但想先恢复可用 | 旧前端可直接用一个临时容器顶上：`docker run --rm -p 127.0.0.1:8080:80 -v ~/legacy-frontend-20261007:/usr/share/nginx/html:ro nginx:alpine` |
+| 数据层 | 完全不受影响（本次未动任何数据卷） |
+
+## 7. 日常命令（第六次变更后）
+
+| 目的 | 命令 |
+|---|---|
+| 起/更新全栈 | `docker compose up -d` |
+| **改完前端后重建** | `docker compose up -d --build frontend` |
+| 只重建前端镜像 | `docker compose build frontend` |
+| 停/起前端 | `docker compose stop frontend` / `docker compose start frontend` |
+| 改完 nginx 配置热载 | `docker compose exec frontend nginx -s reload` |
+| 看前端日志 | `docker compose logs -f --tail=100 frontend` |
+| 本地开发（需 node） | `cd frontend && npm install && npm run dev` → `http://localhost:5173` |
+| 开发期连服务器后端 | 先 `ssh -L 8000:127.0.0.1:8000 azureuser@<IP> -N`，再 `npm run dev` |
+
+**已失效的命令**（记下来免得再试）：
+
+| 旧命令 | 现状 |
+|---|---|
+| 改宿主机 `frontend/*.js` 即时生效 | ❌ 已失效，现在跑的是镜像里的构建产物 |
+| 访问 `8000/ui/` 看页面 | ❌ 404，api 不再托管前端 |
+| `docker compose exec frontend nginx -s reload` 之外的热更新手段 | 无 |
+

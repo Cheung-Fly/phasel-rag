@@ -375,7 +375,10 @@ services:
 
   # ------------------------------------------------------------ 会话存档（真相源）
   postgres:
-    image: postgres:16-alpine
+    # 用 pgvector 官方镜像替代 postgres:16-alpine：阶段 D 的长期记忆需要
+    # vector 类型做语义检索（user_facts 表的 embedding 列）。
+    # 数据目录与官方 PG16 完全兼容，换镜像不需要迁移 volume 里的数据。
+    image: pgvector/pgvector:pg16
     container_name: rag-postgres
     restart: unless-stopped
     environment:

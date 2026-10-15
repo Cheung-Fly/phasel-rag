@@ -76,6 +76,51 @@ def _sanitize_citations(text: str, source_count: int) -> str:
     return cleaned
 
 
+# ---------------------------------------------------------------- 长期记忆（阶段 D）
+def _user_facts_text(owner_user_id: str, question: str, top_k: int = 5) -> str:
+    """检索与当前问题相关的长期记忆，拼成给 Prompt 用的一段文本。
+
+    降级链：fact_store 不可用 / pgvector 未装 / embedding 失败 → 返回空串，
+    对应 Prompt 里的【用户长期记忆】段落就是「（无）」，不影响主链路。
+    """
+    try:
+        from .fact_store import get_fact_store
+
+        facts = get_fact_store().search(owner_user_id, question, top_k)
+    except Exception as exc:
+        logger.warning("长期记忆检索失败（已忽略）: %s", exc)
+        return "（无）"
+    if not facts:
+        return "（无）"
+    return "\n".join(
+        f"- [{f['fact_type']}] {f['fact']}" for f in facts
+    )
+
+
+def _enqueue_fact_extraction(
+    owner_user_id: str, session_id: str, user_msg: str, ai_msg: str
+) -> None:
+    """对话落库后，异步登记一次长期记忆抽取（阶段 D）。
+
+    放在 rag 层而不是只放 main.py，是因为流式问答的答案在 rag.answer_stream
+    内部才拼接完整 —— main.py 只能拿到生成器，拿不到最终答案文本。
+    入队失败静默：长期记忆是增强，不是主链路的硬依赖。
+    """
+    try:
+        from .task_store import get_task_store_or_none
+
+        store = get_task_store_or_none()
+        if store is None:
+            return
+        store.enqueue(
+            "fact_extraction",
+            owner_user_id,
+            {"session_id": session_id, "user_msg": user_msg, "ai_msg": ai_msg},
+        )
+    except Exception as exc:
+        logger.info("长期记忆抽取任务入队失败（已跳过）: %s", exc)
+
+
 # ---------------------------------------------------------------- 入库并发闸门
 _gate: threading.BoundedSemaphore | None = None
 _gate_lock = threading.Lock()
@@ -583,6 +628,7 @@ def answer(question: str, session_id: str, owner_user_id: str) -> dict:
     )
     if temporal_answer:
         get_memory().append_for_user(owner_user_id, session_id, question, temporal_answer)
+        _enqueue_fact_extraction(owner_user_id, session_id, question, temporal_answer)
         return {"answer": temporal_answer, "sources": sources, "session_id": session_id}
 
     chain = (
@@ -603,11 +649,13 @@ def answer(question: str, session_id: str, owner_user_id: str) -> dict:
         "current_date": prompt_date,
         "context": "\n\n---\n\n".join(context_parts),
         "history": history_text,
+        "user_facts": _user_facts_text(owner_user_id, question),
         "question": question,
     })
     result = _sanitize_citations(result, len(sources))
 
     get_memory().append_for_user(owner_user_id, session_id, question, result)
+    _enqueue_fact_extraction(owner_user_id, session_id, question, result)
     return {"answer": result, "sources": sources, "session_id": session_id}
 
 
@@ -675,6 +723,7 @@ def answer_stream(question: str, session_id: str, owner_user_id: str):
     )
     if temporal_answer:
         get_memory().append_for_user(owner_user_id, session_id, question, temporal_answer)
+        _enqueue_fact_extraction(owner_user_id, session_id, question, temporal_answer)
         yield {"type": "token", "text": temporal_answer}
         return
 
@@ -701,6 +750,7 @@ def answer_stream(question: str, session_id: str, owner_user_id: str):
         "current_date": prompt_date,
         "context": "\n\n---\n\n".join(context_parts),
         "history": history_text,
+        "user_facts": _user_facts_text(owner_user_id, question),
         "question": question,
     }):
         if not chunk:
@@ -723,3 +773,4 @@ def answer_stream(question: str, session_id: str, owner_user_id: str):
 
     # 流结束后才写记忆：确保存进去的是完整答案
     get_memory().append_for_user(owner_user_id, session_id, question, "".join(collected))
+    _enqueue_fact_extraction(owner_user_id, session_id, question, "".join(collected))

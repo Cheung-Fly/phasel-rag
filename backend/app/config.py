@@ -273,6 +273,16 @@ class Settings(BaseSettings):
     browser_circuit_failure_threshold: int = Field(default=3, ge=1, le=20)
     browser_circuit_recovery_seconds: int = Field(default=30, ge=1, le=3600)
 
+    # ---------- 终端执行（run_shell，2026-10-15 新增）----------
+    # shell 容器的 MCP 地址（compose 内网），以及两条独立超时：
+    #   shell_exec_timeout_seconds —— subprocess 执行超时（shell 容器内部强杀）；
+    #   shell_mcp_timeout_seconds —— api 调 shell MCP 的 HTTP 超时（略大于执行超时）。
+    shell_mcp_url: str = "http://shell:8767/mcp"
+    shell_exec_timeout_seconds: int = Field(default=10, ge=1, le=300)
+    shell_mcp_timeout_seconds: int = Field(default=15, ge=1, le=300)
+    shell_circuit_failure_threshold: int = Field(default=3, ge=1, le=20)
+    shell_circuit_recovery_seconds: int = Field(default=30, ge=1, le=3600)
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

@@ -66,6 +66,7 @@ services:
     networks:
       - default
       - browser_internal
+      - shell_internal
     env_file:
       - .env
     ports:
@@ -88,6 +89,8 @@ services:
       postgres:
         condition: service_healthy
       browser:
+        condition: service_healthy
+      shell:
         condition: service_healthy
     # ---- 内存护栏 ----
     # 由 4g 下调到 2g：向量索引（原先最占内存的部分）已迁出本进程，
@@ -228,6 +231,36 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    logging: *logging
+
+  # ------------------------------------------------------------ 终端执行沙箱（run_shell，2026-10-15 新增）
+  # 与 browser 容器完全同构的安全模式：非特权 + no-new-privileges + 无 docker.sock
+  # + 无宿主端口 + 独立 shell_internal 网络 + 专用 /work 工作目录。
+  # ★ 无 env_file / environment —— 否则白名单里的 env 命令会泄密钥。
+  # 只经 compose 内网被 api 访问（api 加 shell_internal 网络）。
+  # 内存 128m 常驻 < 20 MiB（纯 FastMCP + subprocess），峰值在「跑命令 + 截断输出」瞬间。
+  shell:
+    build:
+      context: ./backend
+      dockerfile: shell/Dockerfile
+    image: phase1-rag-shell:0.1.0
+    container_name: rag-shell
+    restart: unless-stopped
+    user: "${COMPOSE_USER:-1000:1000}"
+    networks:
+      - shell_internal
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./data/shell-work:/work
+    mem_limit: 128m
+    memswap_limit: 192m
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8767),3); s.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     logging: *logging
 
   # ------------------------------------------------------------ RAGAS 评测（手动运行）
@@ -465,4 +498,6 @@ services:
 
 networks:
   browser_internal:
+    driver: bridge
+  shell_internal:
     driver: bridge

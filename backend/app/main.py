@@ -41,6 +41,7 @@ from starlette.concurrency import run_in_threadpool
 
 from . import rag
 from .browser_agent import answer_browser_task
+from .shell_agent import answer_shell_task, intends_shell as _intends_shell
 from .approval_store import (
     STATUS_APPROVED,
     STATUS_EXECUTED,
@@ -92,6 +93,10 @@ request_limiter = SlidingWindowRateLimiter(
 browser_breaker = CircuitBreaker(
     _settings.browser_circuit_failure_threshold,
     _settings.browser_circuit_recovery_seconds,
+)
+shell_breaker = CircuitBreaker(
+    _settings.shell_circuit_failure_threshold,
+    _settings.shell_circuit_recovery_seconds,
 )
 
 # CORS 白名单来自环境变量 CORS_ORIGINS（逗号分隔），默认留空。
@@ -309,8 +314,6 @@ def _current_user(request: Request) -> AuthenticatedUser:
 
 
 BROWSER_MCP_URL = "http://browser:8766/mcp"
-
-
 def _match_login_target(question: str, owner_user_id: str) -> dict | None:
     """在用户问题里按别名匹配已登记的站点。
 
@@ -381,6 +384,57 @@ async def _call_browser_mcp(browser_url: str, tool_name: str, arguments: dict) -
     except Exception:
         browser_breaker.failure()
         raise
+
+
+async def _call_shell_mcp(tool_name: str, arguments: dict) -> str:
+    """调用 shell 容器的 MCP 工具（复用 _call_browser_mcp 的范式，独立熔断器）。
+
+    与浏览器通道完全独立：shell_breaker 的失败率/恢复窗口不与 browser_breaker 共享，
+    否则浏览器一次抖动会把 shell 也熔断掉（反之亦然）。
+    """
+    if not shell_breaker.allow():
+        raise RuntimeError("Shell MCP circuit is open")
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    try:
+        async with streamablehttp_client(_settings.shell_mcp_url) as (
+            read_stream,
+            write_stream,
+            _,
+        ):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                result = await session.call_tool(tool_name, arguments=arguments)
+        if result.isError:
+            raise RuntimeError("Shell MCP tool returned an error")
+        text_results = [item.text for item in result.content if hasattr(item, "text")]
+        if len(text_results) != 1:
+            raise RuntimeError("Shell MCP tool returned an invalid result")
+        shell_breaker.success()
+        return text_results[0]
+    except Exception:
+        shell_breaker.failure()
+        raise
+
+
+async def _execute_shell_command(command: str) -> dict:
+    """执行一条只读命令（经 shell 容器第二道防线校验），返回结构化结果。
+
+    只读命令的真正执行入口：classify 已判 readonly，这里再经 shell 容器
+    二次校验后执行。返回 {"status", "stdout", "exit_code"}。
+    """
+    import json as _json
+
+    raw = await _call_shell_mcp("run_shell", {"command": command})
+    try:
+        result = _json.loads(raw)
+        if not isinstance(result, dict):
+            raise ValueError("invalid shell result")
+        return result
+    except Exception as exc:
+        logger.error("Shell MCP result parse failed: %s", type(exc).__name__)
+        raise HTTPException(502, "终端执行结果无法解析") from exc
 
 
 def _execute_login_tool(
@@ -538,6 +592,66 @@ def _answer_browser_task(
     except Exception as exc:
         logger.error("审批登记失败: %s", type(exc).__name__)
         task["answer"] += "\n\n（审批登记失败，本次没有可批准的操作。）"
+    return task
+
+
+def _answer_shell_task(
+    question: str,
+    user: AuthenticatedUser,
+    session_id: str = "",
+) -> dict:
+    """走一次 shell 任务，并把「待批准的写命令」登记成审批记录。
+
+    与 _answer_browser_task 平行：shell 循环只产命令，从不直接执行危险命令。
+    readonly 命令在 shell_agent 内部经 _execute_shell_command 直接执行；
+    dangerous 命令在这里登记审批（action="run_shell"），等用户批准后由
+    execute_operation 的 run_shell 分支真正执行。
+    """
+    from .shell_exec import summarize
+
+    async def call_for_user(owner_user_id: str, name: str, arguments: dict) -> str:
+        if owner_user_id != user.user_id:
+            raise RuntimeError("Shell task attempted to cross user boundary")
+        if name != "run_shell":
+            raise RuntimeError("Shell task attempted to call an unknown tool")
+        result = await _execute_shell_command(arguments["command"])
+        import json as _json
+
+        return _json.dumps(result, ensure_ascii=False)
+
+    task = answer_shell_task(question, user.user_id, call_for_user)
+    task["shell_approval"] = None
+
+    pending = task.pop("pending_shell", None) or {}
+    command = pending.get("command")
+    if not command:
+        return task
+
+    store = get_approval_store_or_none()
+    if store is None:
+        # 闸门不可用 ⇒ 不登记审批。刻意不退化成「直接执行」。
+        logger.error("审批闸门不可用，本次写命令未被登记")
+        task["answer"] += "\n\n（审批闸门暂时不可用，本次没有登记可批准的命令。）"
+        return task
+
+    try:
+        task["shell_approval"] = store.create(
+            user.user_id,
+            target=command,
+            session_id=session_id,
+            action="run_shell",
+            detail={
+                "classification": "dangerous",
+                "summary": summarize(command),
+                "question": question[:200],
+            },
+        )
+    except ValueError as exc:
+        logger.error("shell 审批登记被拒绝: %s", exc)
+        task["answer"] += f"\n\n（{exc}）"
+    except Exception as exc:
+        logger.error("shell 审批登记失败: %s", type(exc).__name__)
+        task["answer"] += "\n\n（审批登记失败，本次没有可批准的命令。）"
     return task
 
 
@@ -1096,6 +1210,78 @@ def _get_approval_store():
         raise HTTPException(503, "操作审批闸门暂不可用") from exc
 
 
+async def _execute_shell_approval(
+    user: AuthenticatedUser,
+    approval_id: str,
+    approval: dict,
+    store,
+) -> dict:
+    """执行一条已批准的 run_shell 命令，并把结果写回审批记录。
+
+    这是危险命令的**唯一执行入口**（用户批准后触发）。结果（exit_code + stdout）
+    写回审批记录，前端经 listApprovals 读回、在卡片内展示「已执行 ✓ 输出」，
+    顺带解决「刷新后审批卡片消失」的遗留 bug（结果挂在可查询的审批记录上）。
+    """
+    if not shell_breaker.allow():
+        # 电路断开 ⇒ 请求没发出去 ⇒ 命令不可能执行 ⇒ 审批保持 approved，稍后重试。
+        raise HTTPException(502, "终端执行暂不可用，请稍后重试")
+
+    claimed = store.begin_execution(user.user_id, approval_id)
+    if claimed is None:
+        raise HTTPException(409, "该审批正在执行或已过期")
+
+    command = claimed["target"]
+    try:
+        # 用 run_approved_shell（而非 run_shell）：危险命令已在审批闸门通过，
+        # 这里显式下发「已批准」的语义。shell 容器仍会做最后一道 forbidden 兜底。
+        raw = await _call_shell_mcp("run_approved_shell", {"command": command})
+        import json as _json
+
+        result = _json.loads(raw)
+        if not isinstance(result, dict):
+            raise ValueError("invalid shell result")
+    except Exception as exc:
+        # 与浏览器点击同源：传输层异常无法区分「没送达」与「送达没回」，
+        # 后者可能已执行。落 failed 终态，不自动重试。
+        logger.error("Shell command execution failed: %s", type(exc).__name__)
+        store.complete_execution(
+            user.user_id, approval_id, outcome=STATUS_FAILED,
+            detail={"reason": "shell_unreachable"},
+        )
+        raise HTTPException(502, "终端命令未能确认执行，请到终端环境核对") from exc
+
+    status = result.get("status")
+    exit_code = result.get("exit_code")
+    stdout = result.get("stdout", "")
+
+    if status == "executed":
+        store.complete_execution(
+            user.user_id, approval_id, outcome=STATUS_EXECUTED,
+            detail={"command": command, "exit_code": exit_code, "stdout": stdout[:2000]},
+        )
+        return {"status": STATUS_EXECUTED, "exit_code": exit_code, "stdout": stdout}
+    if status == "timeout":
+        store.complete_execution(
+            user.user_id, approval_id, outcome=STATUS_FAILED,
+            detail={"reason": "timeout", "command": command},
+        )
+        return {"status": STATUS_FAILED, "reason": "timeout", "stdout": stdout}
+    if status in {"forbidden", "approval_required", "parse_error", "empty"}:
+        # shell 侧第二道防线拒绝：这不是传输故障，而是「命令本就不该执行」。
+        # 落 failed，且把拒绝原因如实返回。
+        store.complete_execution(
+            user.user_id, approval_id, outcome=STATUS_FAILED,
+            detail={"reason": status, "command": command},
+        )
+        return {"status": STATUS_FAILED, "reason": status, "stdout": stdout}
+    # exec_error / 其它未知状态
+    store.complete_execution(
+        user.user_id, approval_id, outcome=STATUS_FAILED,
+        detail={"reason": status or "unknown_status", "command": command},
+    )
+    return {"status": STATUS_FAILED, "reason": status or "unknown_status", "stdout": stdout}
+
+
 @app.get("/api/approvals", tags=["审批"], summary="列出待处理与最近的操作审批")
 def list_approvals(
     limit: int = Query(default=20, ge=1, le=100),
@@ -1177,6 +1363,10 @@ async def execute_operation(
         # pending（还没批准）/ rejected / executing（并发中）/ executed / unknown
         # 全走同一个响应：它们都不是「可以执行」的状态。
         raise HTTPException(409, "该审批尚未批准或已被处理")
+
+    # ★ 按 action 分流：run_shell 走终端执行，其余（click_element）走浏览器点击。
+    if approval["action"] == "run_shell":
+        return await _execute_shell_approval(user, approval_id, approval, store)
 
     if not browser_breaker.allow():
         # 电路已断开 ⇒ 请求根本没发出去，点击不可能发生 ⇒ 审批保持 approved，
@@ -1530,6 +1720,19 @@ def chat(
                 "session_id": session_id,
                 "browser_session_active": browser_session_active,
             }
+        # shell 意图路由（阶段 C 之后新增）：问题明确要求执行 Linux 命令时
+        # 走 shell 循环，否则维持原浏览器路径。判断靠 LLM 而非关键词。
+        if _intends_shell(req.question):
+            shell_task = _answer_shell_task(req.question, user, session_id)
+            get_memory().append_for_user(
+                user.user_id, session_id, req.question, shell_task["answer"]
+            )
+            return {
+                "answer": shell_task["answer"],
+                "sources": [],
+                "session_id": session_id,
+                "shell_approval": shell_task["shell_approval"],
+            }
         task = _answer_browser_task(req.question, user, session_id)
         get_memory().append_for_user(user.user_id, session_id, req.question, task["answer"])
         return {
@@ -1602,6 +1805,17 @@ def chat_stream(
                         yield sse({"type": "browser_session", "active": True})
                     get_memory().append_for_user(user.user_id, session_id, req.question, answer)
                     yield sse({"type": "token", "text": answer})
+                    yield sse({"type": "done", "session_id": session_id})
+                    return
+                # shell 意图路由（与 /api/chat 的 student 分支一致）。
+                if _intends_shell(req.question):
+                    shell_task = _answer_shell_task(req.question, user, session_id)
+                    if shell_task["shell_approval"]:
+                        yield sse({"type": "shell_approval", "approval": shell_task["shell_approval"]})
+                    get_memory().append_for_user(
+                        user.user_id, session_id, req.question, shell_task["answer"]
+                    )
+                    yield sse({"type": "token", "text": shell_task["answer"]})
                     yield sse({"type": "done", "session_id": session_id})
                     return
                 task = _answer_browser_task(req.question, user, session_id)

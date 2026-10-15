@@ -3,3 +3,9 @@ fastapi==0.116.1
 uvicorn==0.35.0
 # Keep the MCP v1 SDK on its tested Pydantic 2.11 compatibility range.
 pydantic>=2.11,<2.12
+# 数据分析（对标 Muse「按需造工具」）：agent 现场写 pandas 脚本跑分析。
+# numpy 由 pandas 依赖；matplotlib 用于出图；scipy 供统计（可选，体积较大，
+# 若不需要可去掉以缩镜像）。
+pandas==2.2.3
+matplotlib==3.9.2
+numpy==2.1.3

@@ -2560,3 +2560,64 @@ git revert 513111a   # 代码层面回滚
 # suggestions 表与已写入建议：代码回滚后旧代码不读它们，留着无害；
 # 要彻底清掉则 DROP TABLE suggestions;
 ```
+
+# 第十八次变更：阶段 D③ 数据分析能力（对标 Muse「按需造工具」，2026-10-16 凌晨）
+
+## 1. 做了什么
+
+对标 Muse/Grok 的方法论（「有 API 用 API、有 connector 用 connector、都没有才造工具」），
+新增「数据分析」专用能力：让助手能在受限沙箱里**现场写 pandas 脚本、跑分析、出统计结论
++ 图表**。这是「按需造工具」的第一个落地实例——不预先搭一堆分析模块，而是 agent 在
+任务需要时现场生成脚本。
+
+- 新增 `backend/app/analysis_exec.py`：分析脚本**静态安全校验**（纯函数，双镜像共用）——
+  禁外联（requests/urllib/socket/httpx）、禁危险内建（eval/exec/subprocess/os.system/
+  __import__/open 写）、限白名单导入（pandas/numpy/matplotlib 等数据分析库，默认拒绝）。
+- 新增 `backend/app/analysis_agent.py`：分析工具循环，两个工具 `read_data_head`（探查
+  数据结构，只读）+ `propose_analysis_script`（提交脚本走审批）。
+- shell 容器新增两个 MCP 工具：`read_data_head`、`run_analysis`（执行已批准脚本）。
+  `requirements.txt` 加 pandas/matplotlib/numpy；`Dockerfile` 加 fonts-noto-cjk。
+- `main.py`：data_analysis 意图路由（student 分支，优先级在 shell 之前）+ 审批 action
+  分流 + `_execute_analysis_approval` 执行入口。
+
+## 2. 安全模型（三层，与终端执行同构）
+
+| 层 | 机制 |
+|---|---|
+| 专用入口 | `python` **只在 data_analysis 通道放行**，不进通用 run_shell 白名单。分析脚本是唯一的 python 调用来源 |
+| 脚本先审批 | agent 生成的脚本先展示、走审批闸门（action="data_analysis"），批准后才执行；脚本内容落 audit 可查 |
+| 沙箱兜底 | 脚本在 shell 沙箱跑（非特权/无 docker.sock/隔离网络）；shell 侧 run_analysis 会**再静态校验一遍**（第二道防线）；执行前强制注入 `matplotlib.use('Agg')` + 中文字体配置 |
+
+## 3. 踩过的坑（真·排查成本）
+
+1. **弱模型（glm-4-flash）偶发不发 tool call**：把脚本写在回答正文的 ```python 代码块里，
+   而不是调 propose_analysis_script 工具。prompt 强化无效（模型能力问题）。**根治 = 兜底
+   逻辑**：无 tool call 时从正文提取代码块，走与工具提交完全相同的审批路径。
+2. **headless 容器 plt.show() 报错**：LLM 默认生成 `plt.show()`（需 GUI），容器无显示。
+   根治 = 执行前强制注入 `matplotlib.use('Agg')`，不依赖模型遵守 prompt。
+3. **图表中文乱码**：容器无中文字体 → 加 fonts-noto-cjk + rcParams 配 Noto Sans CJK。
+4. **operation_approvals 主键是 approval_id 不是 id**：验收脚本 SQL 用错列名（与
+   suggestions 表的 id 字段混淆）。
+
+## 4. 验收口径（7 项断言全 PASS）
+
+- 上传 CSV → 说「分析销售趋势」→ 生成脚本并登记审批（action=data_analysis）
+- 脚本内容存 detail（不直接下发前端，audit 可查）
+- 批准 → status=approved；执行 → status=executed
+- stdout 正确输出统计结论（均值 1633.33 / 最大值 2100，与 CSV 真实值一致）
+- 禁外联静态校验（requests/socket/urllib 均拒，单测覆盖）
+- 262 tests OK（新增 10 条 analysis 测试，零回归）
+
+## 5. 回滚
+
+```bash
+cd ~/phase1-rag
+git revert bc91584   # 代码层面回滚
+# shell 镜像回退：revert 后 docker compose build shell && docker compose up -d shell
+```
+
+## 6. 后续（阶段 D③ 的延伸，未做）
+
+- 图表文件（/work/chart.png）目前只在容器内，未回传到前端展示（需加「图表 URL 回传」）。
+- 数据入口目前是「文件已在 /work」，未做「从网页抓数据」（那是「结构化抓取」另一块）。
+- 分析结果未持久化到 Artifacts/知识库（对标 Muse 的 Artifacts 存续）。

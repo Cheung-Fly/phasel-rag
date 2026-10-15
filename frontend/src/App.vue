@@ -22,24 +22,63 @@ import { onMounted, onUnmounted, ref } from 'vue';
 import AppSidebar from './components/AppSidebar.vue';
 import ChatPanel from './components/ChatPanel.vue';
 import ToastBar from './components/ToastBar.vue';
+import BrowserHandoff from './components/BrowserHandoff.vue';
 
 import { useTheme } from './composables/useTheme.js';
 import { useHealth } from './composables/useHealth.js';
 import { useDocuments } from './composables/useDocuments.js';
+import { useSites } from './composables/useSites.js';
+import { useAuditTimeline } from './composables/useAuditTimeline.js';
 import { useSessions } from './composables/useSessions.js';
 import { useChat } from './composables/useChat.js';
 import { useComposer } from './composables/useComposer.js';
-import { getCurrent } from './lib/storage.js';
+import { getCurrent, setUserScope } from './lib/storage.js';
+import { api } from './lib/api.js';
+import { useAssistantMode, setAssistantMode } from './composables/useAssistantMode.js';
+import {
+  setBrowserHandoffActive,
+  setBrowserHandoffAvailable,
+} from './composables/useBrowserHandoff.js';
 
 // 窄屏抽屉的开关状态。只在 App 层持有，向下传给侧栏。
 const sidebarOpen = ref(false);
+// 启动引导三态：进行中 / 完成 / 失败。
+// ★ 2026-10-14：单用户本地模式后这里不再有「未登录」这一态 ——
+//   后端不再要求会话，前端也就不该再保留任何登录态判断。
+const booted = ref(false);
+const bootError = ref('');
+// 运行期提示（例如浏览器验证会话恢复失败）。它承载的是「服务连上了，
+// 但某个子功能有问题」这类非致命信息，跟启动失败不是一回事，因此分开。
+const appError = ref('');
 
 const { apply: applyTheme, toggle: toggleTheme } = useTheme();
 const { start: startHealth, stop: stopHealth } = useHealth();
 const { refresh: refreshDocs } = useDocuments();
-const { sync } = useSessions();
-const { busy, stop: stopGenerating, openSession, showWelcome } = useChat();
+const { refresh: refreshSites } = useSites();
+const { refresh: refreshAudit } = useAuditTimeline();
+const { sync, setCurrent } = useSessions();
+const {
+  busy,
+  stop: stopGenerating,
+  openSession,
+  showWelcome,
+  activateMode,
+} = useChat();
 const { requestFocus } = useComposer();
+const assistantMode = useAssistantMode();
+
+async function restoreBrowserSession() {
+  try {
+    const browserSession = await api.browserSession();
+    const sessionAvailable = ['verification_pending', 'login_confirmed']
+      .includes(browserSession.status);
+    setBrowserHandoffAvailable(sessionAvailable);
+    setBrowserHandoffActive(sessionAvailable);
+  } catch (error) {
+    setBrowserHandoffAvailable(false);
+    appError.value = `无法恢复验证浏览器会话：${error.message || '服务暂不可用'}`;
+  }
+}
 
 function onKeydown(e) {
   // Ctrl/Cmd + K：聚焦输入框
@@ -63,14 +102,15 @@ function onKeydown(e) {
   }
 }
 
-onMounted(async () => {
-  applyTheme();                                  // 对齐 DOM 与当前偏好
-  window.addEventListener('keydown', onKeydown);
-
+async function initializeApplication() {
   // 三件事并行发起没有意义 —— 都很快，但顺序影响观感：
   // 先把文档列表和健康状态铺好（用户一进来就能看到「有哪些文档」），
   // 再去决定对话区要显示历史还是欢迎语。
   await refreshDocs();
+  // 站点列表不 await：它的结果不影响下面「显示历史还是欢迎语」的判断，
+  // 而它是个人助手侧才显示的面板 —— 让它挡住对话区的出现不值得。
+  // refresh() 内部已经吞掉了失败（转成面板上的 listError），不会产生未捕获的 rejection。
+  refreshSites();
   startHealth();
 
   const list = await sync();
@@ -79,14 +119,67 @@ onMounted(async () => {
   //   1) 本地记着一个 session_id；
   //   2) 它确实还在服务器返回的列表里 —— 否则会去请求一个已删除的会话，
   //      用户看到的是空的对话区，会以为数据丢了。
-  const saved = getCurrent();
+  const saved = getCurrent(assistantMode.value);
   if (saved && list.some((s) => s.id === saved)) {
     await openSession(saved);
   } else {
     showWelcome();
   }
 
+  if (assistantMode.value === 'student') {
+    // 审计时间线同样不 await：它是个人助手侧的侧栏面板，
+    // 没有理由挡住对话区的出现。refresh() 内部已吞掉失败（转成 error ref）。
+    refreshAudit();
+    await restoreBrowserSession();
+  }
+
   requestFocus();
+}
+
+async function switchAssistantMode(mode) {
+  if (busy.value || mode === assistantMode.value) return;
+  setAssistantMode(mode);
+  await activateMode(mode);
+  if (mode === 'student') {
+    // 切回个人助手时重取一次：时间线里的一条条都是「刚刚那次操作到底
+    // 成没成」，用户切过来的时机往往正是想确认这件事。
+    refreshAudit();
+    await restoreBrowserSession();
+  }
+  requestFocus();
+}
+
+async function bootstrap() {
+  // 单用户本地模式下的「启动」只有一件事：取回本机主人身份。
+  // ★ 为什么仍然要问一次 /api/auth/me，而不是干脆不要这个请求：
+  //   身份里的 user_id 是 localStorage 命名空间的一部分
+  //   （rag.<user_id>.sessions / .currentSession，见 lib/storage.js）。
+  //   跳过它就等于让本地索引换一个命名空间，用户会看到「历史会话全没了」。
+  //   所以这里保留这次调用，但它的失败语义变了：不是「去登录」，
+  //   而是「后端没起来」—— 因此展示的是一个可重试的错误页。
+  bootError.value = '';
+  try {
+    const user = await api.authMe();
+    setUserScope(user.user_id);
+    setCurrent(null);
+    await initializeApplication();
+  } catch (error) {
+    setBrowserHandoffAvailable(false);
+    bootError.value = error.message || '无法连接本机助手服务';
+  } finally {
+    booted.value = true;
+  }
+}
+
+async function retryBoot() {
+  booted.value = false;
+  await bootstrap();
+}
+
+onMounted(async () => {
+  applyTheme();
+  window.addEventListener('keydown', onKeydown);
+  await bootstrap();
 });
 
 onUnmounted(() => {
@@ -97,13 +190,75 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <!-- 窄屏侧栏开关。宽屏下由 CSS 隐藏（媒体查询里才 display:block） -->
-  <button class="btn-menu" title="显示/隐藏侧栏" @click="sidebarOpen = !sidebarOpen">☰</button>
-
-  <div class="layout">
-    <AppSidebar :open="sidebarOpen" />
-    <ChatPanel @close-sidebar="sidebarOpen = false" />
-  </div>
-
+  <!-- 启动引导。原来是「正在验证登录状态 → 登录表单 → 主界面」三步，
+       单用户本地模式后收敛为「启动中 → 主界面」，只在启动失败时多一屏。 -->
+  <main v-if="!booted" class="auth-gate">
+    <p>正在启动本机助手…</p>
+  </main>
+  <main v-else-if="bootError" class="auth-gate">
+    <div class="auth-card">
+      <h1>无法连接到本机助手</h1>
+      <p>{{ bootError }}</p>
+      <p>页面已加载，但读不到本机后端。请确认后端服务已启动后重试。</p>
+      <button type="button" @click="retryBoot">重试</button>
+    </div>
+  </main>
+  <template v-else>
+    <button class="btn-menu" title="显示/隐藏侧栏" @click="sidebarOpen = !sidebarOpen">☰</button>
+    <div class="layout">
+      <AppSidebar :open="sidebarOpen" :assistant-mode="assistantMode" />
+      <ChatPanel
+        :assistant-mode="assistantMode"
+        :busy="busy"
+        @switch-mode="switchAssistantMode"
+        @close-sidebar="sidebarOpen = false"
+      />
+    </div>
+    <p v-if="appError" class="auth-toast" role="alert">{{ appError }}</p>
+  </template>
   <ToastBar />
+  <BrowserHandoff v-if="assistantMode === 'student'" />
 </template>
+
+<style scoped>
+/* .auth-gate / .auth-card 现在只服务「启动中」与「启动失败」两屏。
+   登录表单相关的 label / input / :disabled 规则已随登录界面一并删除，
+   留着它们只会让人以为这里还有一条登录通路。 */
+.auth-gate {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 20px;
+}
+.auth-card {
+  display: grid;
+  gap: 14px;
+  width: min(400px, 100%);
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+}
+.auth-card h1, .auth-card p { margin: 0; }
+.auth-card h1 { font-size: 20px; }
+.auth-card p { color: var(--text-dim); }
+.auth-card button {
+  padding: 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+}
+.auth-error, .auth-toast { color: var(--err) !important; }
+.auth-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 10;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+}
+</style>

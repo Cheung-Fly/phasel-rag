@@ -20,7 +20,8 @@ const { documents, listError, remove } = useDocuments();
       <template v-else>
         <li v-for="doc in documents" :key="doc.doc_id">
           <span class="doc-name" :title="doc.filename">{{ doc.filename }}</span>
-          <button class="doc-del" title="删除" @click="remove(doc.doc_id)">×</button>
+          <span v-if="doc.shared" class="doc-shared" title="共享只读文档">共享</span>
+          <button v-else class="doc-del" title="删除" @click="remove(doc.doc_id)">×</button>
         </li>
       </template>
     </ul>

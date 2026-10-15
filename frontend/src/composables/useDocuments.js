@@ -5,6 +5,7 @@ import { reactive, ref } from 'vue';
 import { api } from '../lib/api.js';
 import { useToast } from './useToast.js';
 import { useHealth } from './useHealth.js';
+import { useTasks } from './useTasks.js';
 
 const documents = ref([]);
 const listError = ref('');
@@ -26,6 +27,7 @@ const uploader = reactive({
 export function useDocuments() {
   const { toast } = useToast();
   const { maxUploadMb } = useHealth();
+  const { refresh: refreshTasks } = useTasks();
 
   async function refresh() {
     try {
@@ -50,12 +52,19 @@ export function useDocuments() {
   }
 
   /**
-   * 上传并入库。
+   * 上传文档。
    *
    * 注意这里的校验只是「省掉一次注定失败的上传」，
    * 真正的权威校验在后端（而且后端还有字符数 / 切片数两道闸门）。
    * 前端不做任何「我以为后端会拒绝所以先拦下来」的判断，
    * 否则前后端规则一不一致就会拦掉合法文件。
+   *
+   * ★ 2026-10-14 阶段 B：上传的语义变了。响应只代表「已受理」，
+   *   入库在后台任务里进行。所以这里【不能】再显示「入库完成」——
+   *   那会是一个骗人的结论。改为：收起上传进度条（它的 100% 只表示
+   *   字节传完），把进度交给「后台任务」面板，并立刻刷一次任务列表，
+   *   否则用户要等最多 15 秒（空闲轮询间隔）才看见任务出现。
+   *   降级路径（mode=sync，队列不可用）仍是同步语义，保持原样。
    */
   async function upload(file) {
     if (!file) return;
@@ -79,6 +88,16 @@ export function useDocuments() {
           uploader.status = `上传中… ${pct.toFixed(0)}%`;
         },
       });
+
+      if (info.mode === 'queued') {
+        uploader.active = false;
+        uploader.status = '';
+        uploader.ok = null;
+        toast(`已提交「${info.filename || file.name}」，正在后台入库`);
+        await refreshTasks();
+        return;
+      }
+
       uploader.pct = 100;
       const n = info.chunks ?? '?';
       uploader.status = `入库完成：${n} 个片段`;

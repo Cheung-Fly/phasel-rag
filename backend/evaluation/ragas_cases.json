@@ -1,0 +1,86 @@
+[
+  {
+    "id": "founding-year",
+    "question": "成都东软学院是哪一年创办的？",
+    "should_answer": true,
+    "reference": "成都东软学院创办于2003年。",
+    "expected_chunks": [0]
+  },
+  {
+    "id": "founding-duration",
+    "question": "截至2026年，成都东软学院建校多少年？",
+    "should_answer": true,
+    "reference": "学校创办于2003年；按2026减2003计算，建校约23年。由于资料未提供创办的具体月日，不能据此判断周年日是否已经过去。",
+    "expected_chunks": [0]
+  },
+  {
+    "id": "motto",
+    "question": "成都东软学院的校训是什么？",
+    "should_answer": true,
+    "reference": "校训是“精勤博学，学以致用”。",
+    "expected_chunks": [0]
+  },
+  {
+    "id": "education-idea",
+    "question": "学校提出的办学理念是什么？",
+    "should_answer": true,
+    "reference": "学校的办学理念是“教育创造学生价值”。",
+    "expected_chunks": [0]
+  },
+  {
+    "id": "location",
+    "question": "学校位于哪里？",
+    "should_answer": true,
+    "reference": "学校位于四川省成都市都江堰市青城山镇东软大道1号。",
+    "expected_chunks": [0, 3]
+  },
+  {
+    "id": "national-major",
+    "question": "学校的国家级一流本科专业建设点是什么？",
+    "should_answer": true,
+    "reference": "软件工程是国家级一流本科专业建设点。",
+    "expected_chunks": [1]
+  },
+  {
+    "id": "bachelor-upgrade",
+    "question": "学校哪一年升格为本科院校？",
+    "should_answer": true,
+    "reference": "学校于2011年升格为本科院校。",
+    "expected_chunks": [0]
+  },
+  {
+    "id": "tuition",
+    "question": "2026年普通专业（非中外合作办学）的学费范围是多少？",
+    "should_answer": true,
+    "reference": "2026年各招生专业（中外合作办学专业除外）学费在18000—20000元/年之间。",
+    "expected_chunks": [3]
+  },
+  {
+    "id": "wifi-password",
+    "question": "校园无线网络密码是什么？",
+    "should_answer": false,
+    "reference": "当前知识库没有提供校园无线网络密码，无法可靠回答。",
+    "expected_chunks": []
+  },
+  {
+    "id": "scholarship-deadline",
+    "question": "今年国家奖学金的申请截止日期是什么？",
+    "should_answer": false,
+    "reference": "当前知识库没有提供今年国家奖学金申请截止日期，无法可靠回答。",
+    "expected_chunks": []
+  },
+  {
+    "id": "vice-principal-phone",
+    "question": "学校副校长的手机号码是多少？",
+    "should_answer": false,
+    "reference": "当前知识库没有提供副校长的手机号码，无法可靠回答。",
+    "expected_chunks": []
+  },
+  {
+    "id": "vague",
+    "question": "人",
+    "should_answer": false,
+    "reference": "问题过于模糊，且当前知识库不足以确定具体需求，无法可靠回答。",
+    "expected_chunks": []
+  }
+]

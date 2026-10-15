@@ -19,13 +19,14 @@ import { computed, ref } from 'vue';
 import { render } from '../lib/markdown.js';
 import { useToast } from '../composables/useToast.js';
 import SourceList from './SourceList.vue';
+import ClickApprovalCard from './ClickApprovalCard.vue';
 
 const props = defineProps({
   msg: { type: Object, required: true },
   index: { type: Number, required: true },
 });
 
-const emit = defineEmits(['regenerate']);
+const emit = defineEmits(['regenerate', 'settle-approval']);
 
 const { toast } = useToast();
 
@@ -90,6 +91,15 @@ async function copy() {
       <div v-else class="md-body">{{ msg.text }}</div>
 
       <SourceList v-if="msg.sources && msg.sources.length" :sources="msg.sources" />
+
+      <!-- 个人助手：有一次「可能改变网站状态」的点击在等待批准。
+           批准与执行是两次后端调用（各只能成功一次），并且都有 90 秒时效；
+           卡片自己管倒计时与结果，落定后把终态回报给 useChat 以便保留。 -->
+      <ClickApprovalCard
+        v-if="msg.pendingApproval && !msg.streaming && !msg.error"
+        :approval="msg.pendingApproval"
+        @settle="(payload) => emit('settle-approval', { index, ...payload })"
+      />
 
       <div v-if="showTools" class="msg-tools">
         <button class="tool" title="复制回答内容" @click="copy">

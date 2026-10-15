@@ -1,0 +1,15 @@
+[
+  {"id": "founding-year", "question": "学校什么时候创办的？", "expected_chunks": [0]},
+  {"id": "founding-paraphrase", "question": "学校基本创办年份是什么？", "expected_chunks": [0]},
+  {"id": "founding-duration", "question": "成都东软学院建校多少年了？", "expected_chunks": [0]},
+  {"id": "motto", "question": "学校的校训是什么？", "expected_chunks": [0]},
+  {"id": "education-idea-paraphrase", "question": "学校教育理念的那句话是什么？", "expected_chunks": [0]},
+  {"id": "location", "question": "学校在哪座城市？", "expected_chunks": [0, 3]},
+  {"id": "national-major", "question": "哪个专业是国家级一流本科专业建设点？", "expected_chunks": [1]},
+  {"id": "bachelor-upgrade", "question": "学校哪一年升格为本科？", "expected_chunks": [0]},
+  {"id": "tuition", "question": "2026年普通专业学费是多少？", "expected_chunks": [3]},
+  {"id": "wifi-password", "question": "校园无线网络密码是什么？", "expected_chunks": []},
+  {"id": "scholarship-deadline", "question": "今年国家奖学金申请截止日期是什么？", "expected_chunks": []},
+  {"id": "vice-principal-phone", "question": "学校副校长的手机号码是多少？", "expected_chunks": []},
+  {"id": "vague", "question": "人", "expected_chunks": []}
+]

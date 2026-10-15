@@ -8,19 +8,37 @@
 import BrandBar from './BrandBar.vue';
 import UploadPanel from './UploadPanel.vue';
 import DocumentList from './DocumentList.vue';
+import TaskPanel from './TaskPanel.vue';
+import SitePanel from './SitePanel.vue';
+import AuditTimelinePanel from './AuditTimelinePanel.vue';
 import SessionList from './SessionList.vue';
 import HealthStatus from './HealthStatus.vue';
 
 defineProps({
   open: { type: Boolean, default: false },
+  assistantMode: { type: String, default: 'school' },
 });
 </script>
 
 <template>
   <aside class="sidebar" :class="{ open }">
     <BrandBar />
-    <UploadPanel />
-    <DocumentList />
+    <template v-if="assistantMode === 'school'">
+      <UploadPanel />
+      <DocumentList />
+      <!-- 后台任务紧跟文档列表：上传后「它跑到哪一步了」是紧接着的下一个问题。
+           面板在没有任务、执行器也正常时会自行收起（见 TaskPanel 注释）。 -->
+      <TaskPanel />
+    </template>
+    <!-- 个人助手侧：助手能操作哪些站点（阶段 C ①）。
+         放在这里而不是学校侧：站点注册表只在个人助手模式下参与判断，
+         「登录 XX」这句话本身也只在个人助手里才有意义。 -->
+    <template v-else>
+      <SitePanel />
+      <!-- 紧随站点面板：回答的都是「助手在校园里做过/能做什么」，
+           而且时间线里的操作事件大多源自站点上的点击（阶段 C ④）。 -->
+      <AuditTimelinePanel />
+    </template>
     <SessionList />
     <HealthStatus />
     <div class="sidebar-foot">单击会话打开 · 双击导出 · Ctrl+K 聚焦输入</div>

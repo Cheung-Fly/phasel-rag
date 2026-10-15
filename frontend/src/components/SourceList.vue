@@ -22,7 +22,9 @@ defineProps({
                浏览器不会把其中的尖括号当标签解析（Vue 自动转义）。 -->
           <span class="source-file">
             {{ s.filename || '未知' }}
-            <span class="score">{{ s.score }}</span>
+            <span class="score">
+              向量 {{ s.score }} · 词项 {{ s.lexical_coverage ?? '—' }}
+            </span>
           </span>
           <span class="source-preview">{{ s.preview || '' }}</span>
         </span>

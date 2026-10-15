@@ -74,7 +74,12 @@ body { overflow: hidden; }
 
 /* ---------- 整体布局 ----------
    flex + 100vh 实现「整页不滚动，只有内部区域滚动」。 */
-.layout { display: flex; height: 100vh; }
+.layout {
+  display: flex;
+  height: 100vh;
+  padding-right: var(--browser-dock-width, 0px);
+  transition: padding-right .18s ease;
+}
 
 /* ==================== 侧栏 ==================== */
 .sidebar {
@@ -184,6 +189,7 @@ body { overflow: hidden; }
   cursor: pointer; font-size: 14px; line-height: 1; padding: 1px 4px; border-radius: 4px;
 }
 .doc-del:hover { color: var(--err); background: color-mix(in srgb, var(--err) 14%, transparent); }
+.doc-shared { color: var(--text-faint); font-size: 10.5px; }
 
 /* ---------- 会话列表 ---------- */
 .session-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
@@ -407,6 +413,62 @@ body { overflow: hidden; }
   margin-left: auto; font-size: 10px; color: var(--text-faint);
   font-family: ui-monospace, Consolas, monospace;
 }
+
+/* ---------- 审批卡片（阶段 C ②） ----------
+   页面控件需要用户逐次批准时才出现。常显、不走 hover：这是一个需要
+   用户主动决策的卡片，藏起来只会让人以为助手卡住了。
+   左侧色条按状态变化：等待批准=警示色、已执行=成功色、已拒绝/超时=灰、
+   失败=错误色。结果文字务必**留在原地**——这张卡片是那次操作唯一的交代。 */
+.msg-approval {
+  margin-top: 10px; padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warn) 6%, transparent);
+}
+.msg-approval.approval-executed {
+  border-left-color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 6%, transparent);
+}
+.msg-approval.approval-rejected,
+.msg-approval.approval-expired {
+  border-left-color: var(--text-faint);
+  background: transparent;
+}
+.msg-approval.approval-failed {
+  border-left-color: var(--err);
+  background: color-mix(in srgb, var(--err) 6%, transparent);
+}
+.approval-head {
+  display: flex; align-items: baseline; gap: 10px;
+  justify-content: space-between;
+}
+.approval-label {
+  font-size: 11.5px; font-weight: 600;
+  color: var(--text-dim); letter-spacing: .02em;
+}
+.approval-timer {
+  font-size: 10.5px; color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.approval-target {
+  margin: 5px 0 0; font-size: 13px; color: var(--text);
+  word-break: break-word;
+}
+.approval-actions { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+.btn-confirm:disabled,
+.msg-approval .btn-ghost:disabled { opacity: .5; cursor: not-allowed; }
+.approval-result { margin: 6px 0 0; font-size: 12.5px; color: var(--text-dim); }
+.approval-error { margin: 6px 0 0; font-size: 12px; color: var(--err); }
+.msg-approval .confirm-hint { display: block; margin: 7px 0 0; }
+.btn-confirm {
+  border: 0; cursor: pointer;
+  padding: 7px 14px; border-radius: var(--radius-sm);
+  background: var(--accent); color: #fff;
+  font-size: 12.5px; font-weight: 600;
+}
+.btn-confirm:hover:not(:disabled) { background: var(--accent-dim); }
+.confirm-hint { font-size: 10.5px; color: var(--text-faint); }
 
 /* ---------- 流式光标 ----------
    ★ 迁移差异：原来光标是一个真实的 <span class="cursor">，由 JS 在

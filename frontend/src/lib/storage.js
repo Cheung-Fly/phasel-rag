@@ -27,9 +27,19 @@
      响应式状态一律由 composables 持有，两者不要混。
    ============================================================ */
 
-const K_SESSIONS = 'rag.sessions';
-const K_CURRENT  = 'rag.currentSession';
+let userScope = 'anonymous';
+const K_SESSIONS = () => `rag.${userScope}.sessions`;
+const K_STUDENT_SESSIONS = () => `rag.${userScope}.student.sessions`;
+const K_CURRENT  = (mode = 'school') => `rag.${userScope}.${mode === 'student' ? 'student.' : ''}currentSession`;
 const K_THEME    = 'rag.theme';
+
+function sessionKey(mode) {
+  return mode === 'student' ? K_STUDENT_SESSIONS() : K_SESSIONS();
+}
+
+export function setUserScope(userId) {
+  userScope = userId || 'anonymous';
+}
 
 /* ---------- 底层读写（localStorage 可能被禁用，全部包 try） ---------- */
 function read(key, fallback) {
@@ -61,19 +71,19 @@ export function setTheme(t) {
 }
 
 /* ---------- 会话列表 ---------- */
-export function getSessions() {
-  const list = read(K_SESSIONS, []);
+export function getSessions(mode = 'school') {
+  const list = read(sessionKey(mode), []);
   return Array.isArray(list) ? list : [];
 }
 
-export function saveSessions(list) {
-  write(K_SESSIONS, list.slice(0, 50));   // 最多留 50 条，防止无限增长
+export function saveSessions(list, mode = 'school') {
+  write(sessionKey(mode), list.slice(0, 50));   // 最多留 50 条，防止无限增长
 }
 
 /** 新增或更新一条会话索引 */
-export function upsertSession(sessionId, title, ts) {
+export function upsertSession(sessionId, title, ts, mode = 'school') {
   if (!sessionId) return;
-  const list = getSessions();
+  const list = getSessions(mode);
   const i = list.findIndex((s) => s.id === sessionId);
   if (i >= 0) {
     list[i].ts = ts || Date.now();
@@ -82,11 +92,11 @@ export function upsertSession(sessionId, title, ts) {
     list.unshift({ id: sessionId, title: title || '新会话', ts: ts || Date.now() });
   }
   list.sort((a, b) => b.ts - a.ts);
-  saveSessions(list);
+  saveSessions(list, mode);
 }
 
-export function removeSession(sessionId) {
-  saveSessions(getSessions().filter((s) => s.id !== sessionId));
+export function removeSession(sessionId, mode = 'school') {
+  saveSessions(getSessions(mode).filter((s) => s.id !== sessionId), mode);
 }
 
 /**
@@ -100,9 +110,9 @@ export function removeSession(sessionId) {
  *   - 服务器有、本地也有 → 以服务器时间和轮数为准（那是真相）
  *   - 本地有、服务器没有 → 服务器记忆已丢，从本地剔除（避免点进去是空的）
  */
-export function reconcile(serverSessions) {
+export function reconcile(serverSessions, mode = 'school') {
   const serverMap = new Map((serverSessions || []).map((s) => [s.session_id, s]));
-  const local = getSessions();
+  const local = getSessions(mode);
 
   // 以服务器为准，重建列表
   const rebuilt = [];
@@ -119,16 +129,16 @@ export function reconcile(serverSessions) {
     });
   }
   rebuilt.sort((a, b) => b.ts - a.ts);
-  saveSessions(rebuilt);
+  saveSessions(rebuilt, mode);
   return rebuilt;
 }
 
 /* ---------- 当前会话 ---------- */
-export function getCurrent() { return read(K_CURRENT, null); }
+export function getCurrent(mode = 'school') { return read(K_CURRENT(mode), null); }
 
-export function setCurrent(id) {
-  if (id) write(K_CURRENT, id);
-  else { try { localStorage.removeItem(K_CURRENT); } catch { /* 忽略 */ } }
+export function setCurrent(id, mode = 'school') {
+  if (id) write(K_CURRENT(mode), id);
+  else { try { localStorage.removeItem(K_CURRENT(mode)); } catch { /* 忽略 */ } }
 }
 
 /* ---------- 导出 ---------- */

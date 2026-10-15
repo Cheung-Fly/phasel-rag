@@ -18,7 +18,7 @@ import MessageBubble from './MessageBubble.vue';
 
 const emit = defineEmits(['close-sidebar']);
 
-const { messages, scrollReq, regenerate } = useChat();
+const { messages, scrollReq, regenerate, settleApproval } = useChat();
 
 const box = ref(null);
 
@@ -51,6 +51,7 @@ watch(
       :msg="m"
       :index="i"
       @regenerate="regenerate"
+      @settle-approval="settleApproval"
     />
   </div>
 </template>

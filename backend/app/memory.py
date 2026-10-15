@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 # 进程内最终降级（PG 与 Redis 都不可用时才用；重启即丢）
 _inproc: dict[str, list[dict[str, Any]]] = {}
 _inproc_lock = threading.Lock()
+_owned_inproc: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
 # 建表语句。逐条执行，因为 psycopg3 的 execute() 一次只接受一条语句。
 # role 用 CHECK 约束住取值，避免脏数据混入；
@@ -46,10 +47,16 @@ _SCHEMA = [
     """
     CREATE TABLE IF NOT EXISTS sessions (
         session_id     TEXT PRIMARY KEY,
+        owner_user_id  TEXT REFERENCES app_users(user_id) ON DELETE CASCADE,
         first_question TEXT NOT NULL DEFAULT '',
         created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
         last_active_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
+    """,
+    """
+    ALTER TABLE sessions
+    ADD COLUMN IF NOT EXISTS owner_user_id TEXT
+    REFERENCES app_users(user_id) ON DELETE CASCADE
     """,
     """
     CREATE TABLE IF NOT EXISTS messages (
@@ -62,6 +69,7 @@ _SCHEMA = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id)",
     "CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(last_active_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_owner_active ON sessions(owner_user_id, last_active_at DESC)",
 ]
 
 
@@ -146,6 +154,240 @@ class MemoryStore:
 
     def _key(self, session_id: str) -> str:
         return f"{self._PREFIX}{session_id}"
+
+    def _owned_key(self, owner_user_id: str, session_id: str) -> str:
+        return f"{self._PREFIX}{owner_user_id}:{session_id}"
+
+    def _require_pg(self):
+        if self._pg_pool is None:
+            raise RuntimeError("PostgreSQL is required for owner-scoped chat history")
+        return self._pg_pool
+
+    def session_exists_for_user(self, owner_user_id: str, session_id: str) -> bool:
+        pool = self._require_pg()
+        with pool.connection() as conn:
+            return conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = %s AND owner_user_id = %s",
+                (session_id, owner_user_id),
+            ).fetchone() is not None
+
+    def get_history_for_user(
+        self,
+        owner_user_id: str,
+        session_id: str,
+    ) -> list[dict[str, Any]]:
+        pool = self._require_pg()
+        with pool.connection() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = %s AND owner_user_id = %s",
+                (session_id, owner_user_id),
+            ).fetchone()
+            if not exists:
+                return []
+        cache_key = self._owned_key(owner_user_id, session_id)
+        if self._redis is not None:
+            try:
+                raw = self._redis.get(cache_key)
+                if raw:
+                    return json.loads(raw)
+            except Exception as exc:
+                logger.warning("Redis owned history read failed: %s", type(exc).__name__)
+        with _inproc_lock:
+            local = _owned_inproc.get((owner_user_id, session_id))
+            if local is not None:
+                return list(local)
+        with pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT role, content, EXTRACT(EPOCH FROM created_at)::bigint "
+                "FROM messages WHERE session_id = %s ORDER BY id",
+                (session_id,),
+            ).fetchall()
+        history = self._pair_rows(rows)
+        self._owned_hot_write(owner_user_id, session_id, history)
+        return history
+
+    def append_for_user(
+        self,
+        owner_user_id: str,
+        session_id: str,
+        user_msg: str,
+        ai_msg: str,
+    ) -> None:
+        pool = self._require_pg()
+        with pool.connection() as conn:
+            session = conn.execute(
+                """
+                INSERT INTO sessions(session_id, owner_user_id, first_question)
+                VALUES (%s, %s, %s)
+                ON CONFLICT(session_id) DO UPDATE
+                SET last_active_at = now()
+                WHERE sessions.owner_user_id = EXCLUDED.owner_user_id
+                RETURNING session_id
+                """,
+                (session_id, owner_user_id, user_msg[:60]),
+            ).fetchone()
+            if session is None:
+                raise PermissionError("session does not belong to the authenticated user")
+            conn.execute(
+                "INSERT INTO messages(session_id, role, content) VALUES (%s, 'user', %s)",
+                (session_id, user_msg),
+            )
+            rows = conn.execute(
+                "SELECT role, content, EXTRACT(EPOCH FROM created_at)::bigint "
+                "FROM messages WHERE session_id = %s ORDER BY id",
+                (session_id,),
+            ).fetchall()
+            conn.execute(
+                "INSERT INTO messages(session_id, role, content) VALUES (%s, 'assistant', %s)",
+                (session_id, ai_msg),
+            )
+        history = self._pair_rows(
+            [*rows, ("assistant", ai_msg, int(time.time()))]
+        )
+        self._owned_hot_write(owner_user_id, session_id, history[-self.HOT_TURNS:])
+
+    def list_sessions_for_user(
+        self,
+        owner_user_id: str,
+        assistant_mode: str = "school",
+    ) -> list[dict[str, Any]]:
+        pool = self._require_pg()
+        mode_filter = (
+            "left(s.session_id, 8) = 'student_'"
+            if assistant_mode == "student"
+            else "left(s.session_id, 8) != 'student_'"
+        )
+        with pool.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT s.session_id, s.first_question,
+                       COUNT(m.id) FILTER (WHERE m.role = 'user') AS turns,
+                       EXTRACT(EPOCH FROM s.last_active_at)::bigint
+                FROM sessions AS s
+                LEFT JOIN messages AS m ON m.session_id = s.session_id
+                WHERE s.owner_user_id = %s AND {mode_filter}
+                GROUP BY s.session_id
+                ORDER BY s.last_active_at DESC
+                LIMIT 200
+                """,
+                (owner_user_id,),
+            ).fetchall()
+        return [
+            {
+                "session_id": row[0],
+                "first_question": row[1],
+                "turns": int(row[2]),
+                "last_ts": int(row[3]),
+            }
+            for row in rows
+        ]
+
+    def clear_assistant_for_user(self, owner_user_id: str, assistant_mode: str) -> int:
+        pool = self._require_pg()
+        session_filter = (
+            "left(session_id, 8) = 'student_'"
+            if assistant_mode == "student"
+            else "left(session_id, 8) != 'student_'"
+        )
+        with pool.connection() as conn:
+            session_ids = [
+                row[0]
+                for row in conn.execute(
+                    f"SELECT session_id FROM sessions WHERE owner_user_id = %s AND {session_filter}",
+                    (owner_user_id,),
+                ).fetchall()
+            ]
+            if not session_ids:
+                return 0
+            deleted = conn.execute(
+                f"DELETE FROM sessions WHERE owner_user_id = %s AND {session_filter}",
+                (owner_user_id,),
+            ).rowcount
+        if self._redis is not None:
+            try:
+                for session_id in session_ids:
+                    self._redis.delete(self._owned_key(owner_user_id, session_id))
+            except Exception as exc:
+                logger.warning("Redis assistant history clear failed: %s", type(exc).__name__)
+        with _inproc_lock:
+            for session_id in session_ids:
+                _owned_inproc.pop((owner_user_id, session_id), None)
+        return deleted
+
+    def clear_for_user(self, owner_user_id: str, session_id: str) -> bool:
+        pool = self._require_pg()
+        with pool.connection() as conn:
+            deleted = conn.execute(
+                "DELETE FROM sessions WHERE session_id = %s AND owner_user_id = %s",
+                (session_id, owner_user_id),
+            ).rowcount
+        cache_key = self._owned_key(owner_user_id, session_id)
+        if self._redis is not None:
+            try:
+                self._redis.delete(cache_key)
+            except Exception as exc:
+                logger.warning("Redis owned history deletion failed: %s", type(exc).__name__)
+        with _inproc_lock:
+            _owned_inproc.pop((owner_user_id, session_id), None)
+        return deleted > 0
+
+    def clear_all_for_user(self, owner_user_id: str) -> int:
+        pool = self._require_pg()
+        with pool.connection() as conn:
+            deleted = conn.execute(
+                "DELETE FROM sessions WHERE owner_user_id = %s",
+                (owner_user_id,),
+            ).rowcount
+        prefix = f"{self._PREFIX}{owner_user_id}:"
+        if self._redis is not None:
+            try:
+                for key in self._redis.scan_iter(match=f"{prefix}*", count=100):
+                    self._redis.delete(key)
+            except Exception as exc:
+                logger.warning("Redis owned history clear failed: %s", type(exc).__name__)
+        with _inproc_lock:
+            for key in [key for key in _owned_inproc if key[0] == owner_user_id]:
+                _owned_inproc.pop(key, None)
+        return deleted
+
+    def _owned_hot_write(
+        self,
+        owner_user_id: str,
+        session_id: str,
+        history: list[dict[str, Any]],
+    ) -> None:
+        cache_key = self._owned_key(owner_user_id, session_id)
+        if self._redis is not None:
+            try:
+                self._redis.set(
+                    cache_key,
+                    json.dumps(history, ensure_ascii=False),
+                    ex=self.s.memory_ttl_seconds,
+                )
+                return
+            except Exception as exc:
+                logger.warning("Redis owned history write failed: %s", type(exc).__name__)
+        with _inproc_lock:
+            _owned_inproc[(owner_user_id, session_id)] = list(history)
+
+    @staticmethod
+    def _pair_rows(rows) -> list[dict[str, Any]]:
+        pairs: list[dict[str, Any]] = []
+        pending: dict[str, Any] | None = None
+        for role, content, ts in rows:
+            if role == "user":
+                if pending is not None:
+                    pairs.append(pending)
+                pending = {"user": content, "ai": "", "ts": int(ts)}
+            elif pending is None:
+                pending = {"user": "", "ai": content, "ts": int(ts)}
+            else:
+                pending["ai"] = content
+                pairs.append(pending)
+                pending = None
+        if pending is not None:
+            pairs.append(pending)
+        return pairs
 
     # ------------------------------------------------------------ 热缓存
     def _hot_read(self, session_id: str) -> list[dict[str, Any]] | None:

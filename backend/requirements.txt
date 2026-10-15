@@ -5,8 +5,10 @@
 # Web API
 fastapi>=0.115,<1
 uvicorn[standard]>=0.30,<1
+mcp==1.30.0
 python-multipart>=0.0.9
-pydantic>=2.7,<3
+# MCP v1.30 supports Pydantic 2.11; avoid newer releases that removed SDK internals.
+pydantic>=2.11,<2.12
 pydantic-settings>=2.3,<3
 
 # RAG orchestration + vector store（Chroma 走 HTTP 客户端连独立服务）
@@ -24,6 +26,7 @@ chromadb>=1.5,<2
 # 教训：凡是代码里 import 的包，就必须在这里出现，不能靠别人带。
 langchain-openai>=1.0,<2
 pypdf>=6,<7
+cryptography>=44,<47
 
 # 会话热缓存：Redis（2026-10-07 接入）
 # 原先是"可选依赖"——redis 包没装在镜像里，memory.py 永远走进程内降级，

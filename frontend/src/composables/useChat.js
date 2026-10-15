@@ -26,18 +26,28 @@ import { postStream } from '../lib/sse.js';
 import { useToast } from './useToast.js';
 import { useSessions } from './useSessions.js';
 import { useComposer } from './useComposer.js';
+import { setBrowserHandoffActive } from './useBrowserHandoff.js';
+import { useAssistantMode } from './useAssistantMode.js';
+import { useAuditTimeline } from './useAuditTimeline.js';
+import * as storage from '../lib/storage.js';
 
 /* 消息形状：
      { id, role:'user'|'bot', text, error, streaming, stopped,
-       question, sources, meta }
+       question, sources, meta, pendingApproval }
    question 是「这条回答对应哪个提问」，供「重新生成」使用；
-   它是可空的 —— 欢迎语这类机器人消息没有对应提问。 */
+   它是可空的 —— 欢迎语这类机器人消息没有对应提问。
+   pendingApproval 是个人助手里「等待批准的一次页面点击」，形如
+   { approval_id, target, status, expires_at }；非空时消息下方会渲染一张
+   「批准并执行 / 拒绝」卡片（见 ClickApprovalCard.vue）。
+   ★ 阶段 C ② 起这里放的不是确认文本而是 approval_id：批准必须对应
+     数据库里一条能验证、能审计、且只能消费一次的记录。 */
 
 let seq = 0;
 const nextId = () => `m${++seq}`;
 
 const messages = ref([]);
 const busy = ref(false);
+const assistantMode = useAssistantMode();
 
 /**
  * 滚动请求信号。
@@ -67,6 +77,7 @@ function push(role, text, opts = {}) {
     question: null,
     sources: null,
     meta: null,
+    pendingApproval: null,
     ...opts,
   });
   const proxy = messages.value[messages.value.length - 1];
@@ -78,6 +89,7 @@ export function useChat() {
   const { toast } = useToast();
   const { currentId, upsert, setCurrent, removeLocal, sync } = useSessions();
   const { requestFocus } = useComposer();
+  const { refresh: refreshAuditTimeline } = useAuditTimeline();
 
   /* ---------------------------------------------------------- 发送 */
   async function send(text, opts = {}) {
@@ -85,8 +97,17 @@ export function useChat() {
 
     const question = String(text || '').trim();
     if (!question) return;
+    const mode = assistantMode.value;
 
     busy.value = true;
+    // 一旦有新的一轮对话开始，之前那些「待批准的操作」就已经失去意义
+    // （后端 90 秒 TTL 且一次有效）。不清掉的话，用户会对着一条早就过期的
+    // 记录点下去，收到一个 410 —— 而界面上看起来什么都没发生。
+    // ★ 已经落定的（已执行 / 已拒绝 / 已超时 / 失败）要保留：那张卡片上的
+    //   结果说明是这个操作唯一的可见交代，清掉它等于「做完了但没人告诉你」。
+    messages.value.forEach((m) => {
+      if (m.pendingApproval && !m.pendingApproval.settled) m.pendingApproval = null;
+    });
     if (!opts.skipUserBubble) push('user', question);
 
     const bot = push('bot', '', { streaming: true, question });
@@ -121,7 +142,11 @@ export function useChat() {
     try {
       await postStream(
         '/api/chat/stream',
-        { question, session_id: currentId.value || '' },
+        {
+          question,
+          session_id: currentId.value || '',
+          assistant_mode: mode,
+        },
         (ev) => {
           switch (ev.type) {
             case 'meta':
@@ -133,6 +158,16 @@ export function useChat() {
 
             case 'sources':
               sources = ev.sources || [];
+              break;
+
+            case 'browser_session':
+              setBrowserHandoffActive(Boolean(ev.active));
+              break;
+
+            case 'click_approval':
+              // 后端已经在 PG 里登记了一条 pending 审批，并把它下发过来；
+              // 渲染成卡片，批准/执行分别调 /api/approvals/{id}/approve 与 /execute。
+              bot.pendingApproval = ev.approval || null;
               break;
 
             case 'token':
@@ -197,6 +232,25 @@ export function useChat() {
     }
   }
 
+  /* ---------------------------------------------------------- 审批落定 */
+  /**
+   * 把一条待批准的操作落成终态（由 ClickApprovalCard 上报）。
+   *
+   * 为什么把结果留在消息上而不是另发一条助手消息：这类结果不是「对话」，
+   * 而是「那次操作怎么了」。挂在原来那条消息下面，因果一目了然；
+   * 而且它本来就不在服务端的会话记忆里（执行走的是另一个接口），
+   * 另发一条反而会在重新载入会话时凭空消失。
+   */
+  function settleApproval({ index, outcome, message }) {
+    const msg = messages.value[index];
+    if (!msg || !msg.pendingApproval || msg.pendingApproval.settled) return;
+    msg.pendingApproval = { ...msg.pendingApproval, settled: true, outcome, message };
+    // 卡片落了终态就等于后端刚写下一条审计事件，顺手把时间线重取一次 ——
+    // 于是「我批准了什么」与「它记下了什么」在屏幕上同时出现，可以互相对照。
+    // 只是重取服务端数据，**不是**在本地往列表里插一行（那会打乱游标分页）。
+    refreshAuditTimeline();
+  }
+
   /* ---------------------------------------------------------- 停止 */
   function stop() {
     if (controller) controller.abort();
@@ -224,7 +278,12 @@ export function useChat() {
   function newChat() {
     setCurrent(null);
     messages.value = [];
-    push('bot', '已开启新会话。\n\n之前的对话记忆不再参与，但**知识库文档仍然可用**。');
+    push(
+      'bot',
+      assistantMode.value === 'school'
+        ? '已开启新的“了解学校”会话。回答只参考知识库内容。'
+        : '已开启新的“个人助手”会话。你可以让我登录平台、查看网页或导航；点击可能改变网站状态的控件前，我会先请你确认。',
+    );
     requestFocus();
   }
 
@@ -236,11 +295,23 @@ export function useChat() {
   function showWelcome() {
     setCurrent(null);
     messages.value = [];
-    push('bot',
-      '你好，我是基于你上传文档回答问题的助手。\n\n' +
-      '1. 先在左侧**上传一份文档**（支持 .md / .txt / .pdf）\n' +
-      '2. 然后在下面提问\n\n' +
-      '我会尽量只依据文档内容回答；找不到就明说，**不会编造**。');
+    push(
+      'bot',
+      assistantMode.value === 'school'
+        ? '你好，这里是“了解学校”。我会依据知识库资料回答校园相关问题；资料不足时会明确说明。'
+        : '你好，这里是“个人助手”。登录并确认人工验证后，我可以查看网页、打开安全的同站链接，也可以按你的指示点击页面控件；可能改变网站状态的点击会先请你逐次确认。',
+    );
+  }
+
+  async function activateMode(mode) {
+    setCurrent(storage.getCurrent(mode));
+    messages.value = [];
+    await sync(mode);
+    if (currentId.value) {
+      const loaded = await openSession(currentId.value);
+      if (loaded) return;
+    }
+    showWelcome();
   }
 
   /* ---------------------------------------------------------- 打开历史会话 */
@@ -248,7 +319,7 @@ export function useChat() {
     if (busy.value) { toast('正在生成中，请先停止', 'error'); return false; }
 
     try {
-      const d = await api.history(id);
+      const d = await api.history(id, assistantMode.value);
       const history = d.history || [];
 
       setCurrent(id);
@@ -278,7 +349,7 @@ export function useChat() {
     if (!confirm('删除这段会话？只影响对话记忆，不影响知识库文档。')) return;
 
     // 服务器删除失败也要继续清本地：否则会留下一段「看得见点不开」的僵尸条目
-    try { await api.deleteHistory(id); } catch { /* 忽略 */ }
+    try { await api.deleteHistory(id, assistantMode.value); } catch { /* 忽略 */ }
 
     removeLocal(id);
     if (id === currentId.value) newChat();
@@ -289,5 +360,6 @@ export function useChat() {
   return {
     messages, busy, scrollReq,
     send, stop, regenerate, newChat, showWelcome, openSession, deleteSession,
+    activateMode, settleApproval,
   };
 }

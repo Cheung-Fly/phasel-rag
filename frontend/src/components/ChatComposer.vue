@@ -16,12 +16,36 @@
      但此时 e.isComposing 为 true。不排除掉的话，用拼音输入时
      一按回车选词就会把半截拼音直接发出去。这里显式跳过。
    ============================================================ */
-import { nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { useChat } from '../composables/useChat.js';
 import { useComposer } from '../composables/useComposer.js';
+import { useAssistantMode } from '../composables/useAssistantMode.js';
+import { useSites } from '../composables/useSites.js';
 
 const { send, stop, busy } = useChat();
 const { focusTick } = useComposer();
+const assistantMode = useAssistantMode();
+const { sites } = useSites();
+
+// 个人助手侧的输入提示。
+// ★ 不再写死某一所学校：站点是用户自己登记的，提示语就从已登记的站点里取。
+//   这既避免了「界面示例说东软、用户配的是别的站」这种错位，也顺带告诉用户
+//   「你登记的那个站点现在真的能这么用了」。
+const studentHint = computed(() => {
+  const site = sites.value.find((item) => item.enabled && (item.aliases || []).length);
+  const alias = site && site.aliases[0];
+  return alias
+    ? `例如：帮我登录${alias} · Enter 发送`
+    : '例如：帮我登录校园平台 · Enter 发送';
+});
+
+// 提示语整体在脚本里算好，模板里只做一次绑定：
+// 放进模板的模板字符串里就得依赖编译器把 ref 解包，不如这里明确。
+const placeholderText = computed(() =>
+  assistantMode.value === 'school'
+    ? '询问校园知识库 · Enter 发送 · Shift+Enter 换行'
+    : studentHint.value,
+);
 
 const draft = ref('');
 const ta = ref(null);
@@ -70,7 +94,7 @@ onMounted(autoGrow);
       ref="ta"
       v-model="draft"
       rows="1"
-      placeholder="输入问题 · Enter 发送 · Shift+Enter 换行"
+      :placeholder="placeholderText"
       @keydown="onKeydown"
       @input="autoGrow"
     ></textarea>

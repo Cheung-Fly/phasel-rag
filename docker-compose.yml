@@ -34,10 +34,12 @@
 #  宿主机上改前端源码对容器**不再即时生效**，必须重建镜像。
 #
 #  内存预算（总 7.7 GiB，系统常驻约 0.9 GiB）：
-#      api 2g + chroma 1.5g + postgres 1g + redis 512m + frontend 128m = 5.125 GiB
-#      留约 1.7 GiB 余量给系统与突发，正常不会触发 swap。
+#      api 2g + worker 768m + chroma 1.5g + postgres 1g + redis 512m
+#      + frontend 128m ≈ 5.9 GiB
+#      留约 0.9 GiB 余量给系统与突发，正常不会触发 swap。
 #      注意 limit 是「上限」不是「预留」，实际常驻远低于此
-#      （frontend 纯静态 + 反代，实测常驻仅 6-10 MiB）。
+#      （frontend 纯静态 + 反代，实测常驻仅 6-10 MiB；
+#        worker 空闲时只有解释器 + 连接池，实测常驻约 120-200 MiB）。
 #      注意：frontend 的**构建阶段**是临时的，不在这份预算里 ——
 #      它只在 docker build 期间存在，峰值约 300-500 MiB，构建完即释放。
 #
@@ -61,6 +63,9 @@ services:
     # 为什么用 COMPOSE_USER 而不是 UID/GID：bash 里 UID 是只读变量，
     # 脚本无法 export 它，所以统一用一个自定义变量传 "uid:gid"。
     user: "${COMPOSE_USER:-1000:1000}"
+    networks:
+      - default
+      - browser_internal
     env_file:
       - .env
     ports:
@@ -81,6 +86,8 @@ services:
       redis:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      browser:
         condition: service_healthy
     # ---- 内存护栏 ----
     # 由 4g 下调到 2g：向量索引（原先最占内存的部分）已迁出本进程，
@@ -113,6 +120,144 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # ------------------------------------------------------------ 后台任务执行器（阶段 B 新增）
+  # 为什么要有它：文档入库要跑 1~3 分钟（上百次 embedding 调用）。此前它占着
+  # HTTP 请求，用户关掉页面就前功尽弃，容器还会被健康检查判成不健康。
+  # 现在接口只「落盘 + 入队」，由本服务领取任务并执行。
+  #
+  # ★ 为什么复用 api 镜像而不是新建一个镜像：
+  #   执行体（app/rag.py + app/vectorstore.py + 同一份 requirements）与 api
+  #   完全重合，单独建镜像只会多出一份需要同步维护的依赖清单 ——
+  #   而"代码 import 的包必须显式声明"这条教训（见 backend/requirements.txt）
+  #   说明依赖清单一旦分叉，两边迟早会不一致。
+  #   代价：改后端代码后必须【同时】重建 api 与 worker，否则 worker 跑的是旧代码。
+  #   →  docker compose up -d --build api worker
+  #
+  # ★ 为什么命令是 python -m app.worker 而不是 uvicorn：
+  #   本进程不提供任何 HTTP 接口，只是队列的消费者。给它开端口只会多一个
+  #   需要被守卫的入口（见 deploy/nginx-frontend.conf 的来源校验思路）。
+  #
+  # ★ 为什么只连 default 网络、不连 browser_internal：
+  #   阶段 B 的任务类型只有文档入库，不驱动浏览器。将来若把浏览器自动化
+  #   也做成任务，那时再给它加 browser_internal —— 权限范围按需给，
+  #   不要提前开。
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: phase1-rag-api:0.1.0
+    container_name: rag-worker
+    restart: unless-stopped
+    # 与 api 同因：以宿主机用户身份运行，才能读写 ./data/uploads
+    # （/home/azureuser 权限是 750，镜像内的 appuser 连目录都穿越不进去）。
+    user: "${COMPOSE_USER:-1000:1000}"
+    networks:
+      - default
+    env_file:
+      - .env
+    volumes:
+      # 需要读写：读源文件入库，并在任务终结（成功/失败/取消）后清理它。
+      - ./data/uploads:/app/data/uploads
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      chroma:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    # 空闲时只有一个解释器 + 连接池（实测常驻约 120-200 MiB）；
+    # 入库时的内存峰值由文件解析决定，768m 对 50MB 上限的文档是宽裕的。
+    mem_limit: 768m
+    memswap_limit: 1024m
+    environment:
+      - PYTHONUNBUFFERED=1
+      # 与 api 保持一致：2 vCPU 上超配线程只增加上下文切换开销
+      - OMP_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+      - TOKENIZERS_PARALLELISM=false
+      # 入库护栏必须与 api 完全一致 —— 两边不一致会导致「接口接受、worker 拒绝」
+      # 这种最难排查的不一致（用户看到的是任务莫名失败）。
+      - INGEST_MAX_CHARS=${INGEST_MAX_CHARS:-2000000}
+      - INGEST_MAX_CHUNKS=${INGEST_MAX_CHUNKS:-1200}
+      - INGEST_MAX_CONCURRENT=${INGEST_MAX_CONCURRENT:-1}
+      # 队列参数：轮询间隔 / 租约时长 / 单任务最大尝试次数
+      - TASK_WORKER_POLL_SECONDS=${TASK_WORKER_POLL_SECONDS:-2}
+      - TASK_LEASE_SECONDS=${TASK_LEASE_SECONDS:-60}
+      - TASK_MAX_ATTEMPTS=${TASK_MAX_ATTEMPTS:-3}
+    healthcheck:
+      # ★ 探的是「心跳文件的新鲜度」，不是端口 —— 本进程没有端口。
+      #   心跳线程在每次循环（含空闲轮询）都刷新该文件的时间戳（见 app/worker.py
+      #   的 HEARTBEAT_FILE，两处路径必须一致）。
+      #   超时阈值 45 秒取的是「空闲轮询 2 秒」的 20 倍余量：能容忍 PG 抖动
+      #   导致的若干次心跳失败，又不至于让一个真死掉的进程长期装作健康。
+      #   ★ 为什么不用「队列里有没有任务」来判断：空闲时本来就该没有任务，
+      #     那种探法会把正常运行判成不健康。
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,sys,time; p='/tmp/rag-worker-heartbeat'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p)<45 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *logging
+
+  # ------------------------------------------------------------ 隔离浏览器登录执行器
+  # 仅 API 可通过 Compose 内网访问；不映射任何宿主机端口。
+  browser:
+    build:
+      context: ./backend
+      dockerfile: browser/Dockerfile
+    image: phase1-rag-browser:0.1.0
+    container_name: rag-browser
+    restart: unless-stopped
+    networks:
+      - browser_internal
+    shm_size: 512m
+    mem_limit: 1g
+    memswap_limit: 1280m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8766),3); s.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *logging
+
+  # ------------------------------------------------------------ RAGAS 评测（手动运行）
+  # 独立评测镜像避免把 RAGAS 及其数据分析依赖装进在线 API。
+  # 使用：docker compose --profile evaluation run --rm ragas-eval
+  ragas-eval:
+    build:
+      context: ./backend
+      dockerfile: evaluation/Dockerfile
+    image: phase1-rag-eval:0.1.0
+    container_name: rag-eval
+    profiles: ["evaluation"]
+    env_file:
+      - .env
+    environment:
+      - RAGAS_USERNAME=${RAGAS_USERNAME:-}
+      - RAGAS_PASSWORD=${RAGAS_PASSWORD:-}
+    user: "${COMPOSE_USER:-1000:1000}"
+    volumes:
+      - ./data/evaluation:/app/data/evaluation
+    depends_on:
+      chroma:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    mem_limit: 2g
+    memswap_limit: 2560m
+    logging: *logging
 
   # ------------------------------------------------------------ 向量库
   chroma:
@@ -283,11 +428,20 @@ services:
       # 与 api 一样只绑本机：公网入口依旧交给 SSH 隧道。
       - "127.0.0.1:8080:8080"
     volumes:
-      # ★ 唯一保留的挂载：站点配置。
+      # ★ 唯一保留的挂载：站点配置目录。
       #   调缓存头、加一段 location 只需改文件 + nginx -s reload，
       #   不必为了改一行 nginx 配置而重建整个前端镜像。
       #   前端构建产物则已打进镜像 —— 它属于某个版本，不该被本地文件覆盖。
-      - ./deploy/nginx-frontend.conf:/etc/nginx/conf.d/default.conf:ro
+      #
+      # ★ 2026-10-14 由「挂单个文件」改为「挂整个目录」，起因是一次真实事故：
+      #   挂单个文件时容器持有的是【当时的那个 inode】。用 tar 解包、或编辑器
+      #   原子写（写临时文件再 rename）替换宿主机文件后 inode 变了，容器却仍
+      #   指向旧 inode —— 现象是 `nginx -t` 通过、`nginx -s reload` 也报告成功，
+      #   但加载的始终是旧配置，改动完全不生效且毫无报错。
+      #   实测：宿主机 inode 786623 / 8583 字节，容器内 inode 803397 / 6768 字节。
+      #   挂目录时 nginx 每次按路径查找，目录内的文件被替换后立即可见。
+      #   注意：conf.d 下所有 *.conf 都会被加载，往 deploy/ 放文件时需留意。
+      - ./deploy:/etc/nginx/conf.d:ro
     depends_on:
       - api
     # 纯静态 + 反代，128m 非常宽裕（实测常驻约 6-10 MiB）
@@ -308,3 +462,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  browser_internal:
+    driver: bridge

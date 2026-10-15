@@ -13,6 +13,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY scripts ./scripts
 
 # ★ 本镜像里没有任何前端代码，也不预建前端挂载点。
 #   2026-10-07 前端迁到 Vue3 + Vite 后，由独立的 frontend 镜像（nginx）

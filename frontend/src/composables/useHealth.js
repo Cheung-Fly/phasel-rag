@@ -15,7 +15,7 @@
      它依然有效，所以不能把 applyLimits 塞进 status === 'ok' 分支里 ——
      否则一次向量库抖动会让界面上限退回占位值，显示成错误的数字。
    ============================================================ */
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { api } from '../lib/api.js';
 
 const status         = ref('unknown');   // 'ok' | 'degraded' | 'error' | 'unknown'
@@ -24,6 +24,22 @@ const memoryBackend  = ref('');
 const chromaStatus   = ref('');
 const maxUploadMb    = ref(50);          // 占位初值，真实值由 /health 覆盖
 const ingestMaxChunks = ref(null);
+// 后台任务队列状态（2026-10-14 阶段 B 新增）
+// ★ 为什么要从 /health 拿「执行器是否在线」：
+//   任务入队后由独立的 worker 容器执行。worker 没起来时，上传会成功（202）
+//   却永远停在「排队中」—— 这个故障态从界面上看和「正在处理」几乎一样，
+//   必须由后端明确告知，前端才能把原因说出来。
+const taskQueue      = ref(null);
+
+/**
+ * 执行器是否确实离线。只在「队列后端正常但没有任何 worker 心跳」时为 true ——
+ * 队列本身不可用时另有提示（那时连入队都没成功）。
+ */
+const workerOffline = computed(
+  () => !!taskQueue.value
+    && taskQueue.value.backend === 'postgres'
+    && taskQueue.value.worker_online === false,
+);
 
 const INTERVAL_MS = 30000;
 let timer = null;
@@ -40,6 +56,7 @@ async function check() {
     llmModel.value      = d.llm_model      || '';
     memoryBackend.value = d.memory_backend || '';
     chromaStatus.value  = d.chroma_status  || '';
+    taskQueue.value     = d.task_queue     || null;
 
     // 后端在向量库不可达时会把 status 降级为 degraded，
     // 这时 API 进程本身是活的，但知识库功能已经不可用 —— 必须区分开，
@@ -47,6 +64,7 @@ async function check() {
     status.value = d.status === 'ok' ? 'ok' : 'degraded';
   } catch {
     status.value = 'error';
+    taskQueue.value = null;
   }
 }
 
@@ -64,7 +82,7 @@ export function useHealth() {
 
   return {
     status, llmModel, memoryBackend, chromaStatus,
-    maxUploadMb, ingestMaxChunks,
+    maxUploadMb, ingestMaxChunks, taskQueue, workerOffline,
     check, start, stop,
   };
 }

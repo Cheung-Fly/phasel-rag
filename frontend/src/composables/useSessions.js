@@ -18,21 +18,25 @@ import { ref } from 'vue';
 import { api } from '../lib/api.js';
 import * as storage from '../lib/storage.js';
 import { useToast } from './useToast.js';
+import { useAssistantMode } from './useAssistantMode.js';
 
-const sessions = ref([]);
-const currentId = ref(storage.getCurrent());
+const mode = useAssistantMode();
+const sessions = ref(storage.getSessions(mode.value));
+const currentId = ref(storage.getCurrent(mode.value));
 
 export function useSessions() {
   const { toast } = useToast();
 
   /** 从服务器拉取会话列表并校正本地索引 */
-  async function sync() {
+  async function sync(selectedMode = mode.value) {
     try {
-      const d = await api.listSessions();
-      sessions.value = storage.reconcile(d.sessions || []);
-    } catch {
-      // 服务器取不到就先用本地的，至少别让列表空着
-      sessions.value = storage.getSessions();
+      const d = await api.listSessions(selectedMode);
+      sessions.value = storage.reconcile(d.sessions || [], selectedMode);
+    } catch (error) {
+      sessions.value = [];
+      storage.saveSessions([], selectedMode);
+      setCurrent(null);
+      toast(`会话同步失败：${error.message}`, 'error');
     }
     return sessions.value;
   }
@@ -40,8 +44,8 @@ export function useSessions() {
   /** 新增或更新一条索引（每次问答结束后调用，用第一个问题当标题） */
   function upsert(id, title, ts) {
     if (!id) return;
-    storage.upsertSession(id, title, ts);
-    sessions.value = storage.getSessions();
+    storage.upsertSession(id, title, ts, mode.value);
+    sessions.value = storage.getSessions(mode.value);
   }
 
   /**
@@ -50,47 +54,47 @@ export function useSessions() {
    *   标题（第一个问题）把用户起的名字覆盖回去，用户会觉得「改了没用」。
    */
   function rename(id, title) {
-    const list = storage.getSessions();
+    const list = storage.getSessions(mode.value);
     const item = list.find((s) => s.id === id);
     if (!item) return;
     item.title = title.trim() || item.title;
     item.renamed = true;
-    storage.saveSessions(list);
+    storage.saveSessions(list, mode.value);
     sessions.value = [...list];
   }
 
   function removeLocal(id) {
-    storage.removeSession(id);
-    sessions.value = storage.getSessions();
+    storage.removeSession(id, mode.value);
+    sessions.value = storage.getSessions(mode.value);
   }
 
   function setCurrent(id) {
     currentId.value = id || null;
-    storage.setCurrent(id || null);
+    storage.setCurrent(id || null, mode.value);
   }
 
   function clearLocal() {
-    storage.saveSessions([]);
+    storage.saveSessions([], mode.value);
     sessions.value = [];
   }
 
   /** 清空服务器上的全部会话，返回清掉的条数 */
   async function clearAllRemote() {
-    const d = await api.clearSessions();
+    const d = await api.clearSessions(mode.value);
     clearLocal();
     return d.cleared ?? 0;
   }
 
   /** 导出某段会话为 Markdown 文件 */
   async function exportSession(id) {
-    const d = await api.history(id);
+    const d = await api.history(id, mode.value);
     const history = d.history || [];
     if (!history.length) throw new Error('这段会话没有内容可导出');
     storage.download(`对话-${id.slice(0, 8)}.md`, storage.toMarkdown(id, history, null));
   }
 
   return {
-    sessions, currentId,
+    sessions, currentId, mode,
     sync, upsert, rename, removeLocal, setCurrent, clearLocal, clearAllRemote, exportSession,
   };
 }

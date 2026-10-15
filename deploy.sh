@@ -33,24 +33,44 @@ ok ".env 存在 (权限 $(stat -c '%a' .env))"
 set -a; . ./.env; set +a
 
 # 兼容检测：如果 .env 还是旧的 Groq/Google 模板，直接提示重写
-if [ -n "${GROQ_API_KEY:-}${GOOGLE_API_KEY:-}" ] && [ -z "${DASHSCOPE_API_KEY:-}" ]; then
-  bad ".env 仍是旧的 Groq/Google 模板，但代码已改为阿里百炼。"
+if [ -n "${GROQ_API_KEY:-}${GOOGLE_API_KEY:-}" ] && [ -z "${LLM_API_KEY:-}${DASHSCOPE_API_KEY:-}" ]; then
+  bad ".env 仍是旧的 Groq/Google 模板，但代码已改为 OpenAI 兼容端点。"
   warn "请执行： cp ${APP_DIR}/.env.example ${APP_DIR}/.env && chmod 600 ${APP_DIR}/.env && nano ${APP_DIR}/.env"
   exit 1
 fi
 
-if [ -z "${DASHSCOPE_API_KEY:-}" ]; then
-  bad "DASHSCOPE_API_KEY 为空"
-  warn "申请：https://bailian.console.aliyun.com/  → API-KEY 管理"
+# 2026-10-15 供应商解耦：chat 与 embedding 各配各的。
+# 下面按【与 app 完全相同的回退链】解析，只做检查、不改写 .env ——
+# 真实生效值一律以容器内 Settings 解析结果为准（见末尾的连通性探测）。
+#   chat  key：LLM_API_KEY        ‖ DASHSCOPE_API_KEY
+#   embed key：EMBEDDING_API_KEY  ‖ chat key
+CHAT_KEY="${LLM_API_KEY:-${DASHSCOPE_API_KEY:-}}"
+EMBED_KEY="${EMBEDDING_API_KEY:-$CHAT_KEY}"
+
+if [ -z "$CHAT_KEY" ]; then
+  bad "未配置 chat 凭证：请设置 LLM_API_KEY（旧名 DASHSCOPE_API_KEY 仍兼容）"
   MISSING=1
 else
-  ok "DASHSCOPE_API_KEY 已填写 (${#DASHSCOPE_API_KEY} 字符, 前缀 ${DASHSCOPE_API_KEY:0:4}...)"
+  ok "chat 凭证已填写 (${#CHAT_KEY} 字符, 前缀 ${CHAT_KEY:0:4}...)"
+fi
+if [ -z "$EMBED_KEY" ]; then
+  bad "未配置向量化凭证：请设置 EMBEDDING_API_KEY（留空会自动沿用 chat 的 key）"
+  MISSING=1
 fi
 [ "${MISSING:-0}" = "1" ] && { echo; bad "密钥未填，已停止。填好后重跑本脚本。"; exit 1; }
 
-echo "  chat 模型      : ${LLM_MODEL:-qwen-plus}"
+# 端点同样按「新名优先、旧名回退」，只打印 URL 主机部分以免回显内嵌凭据。
+CHAT_URL="${LLM_BASE_URL:-${DASHSCOPE_BASE_URL:-}}"
+EMBED_URL="${EMBEDDING_BASE_URL:-$CHAT_URL}"
+echo "  chat 端点      : ${CHAT_URL:-<未设置，chat 会启动即报错>}"
+echo "  chat 模型      : ${LLM_MODEL:-qwen-plus}   ← 必须是该端点那家的模型名"
+if [ "$EMBED_URL" = "$CHAT_URL" ]; then
+  echo "  向量化端点     : ${EMBED_URL:-<未设置>} (与 chat 同源)"
+else
+  echo "  向量化端点     : ${EMBED_URL:-<未设置>} (★ 与 chat 不同源)"
+fi
 echo "  embedding 模型 : ${EMBEDDING_MODEL:-text-embedding-v4} (dim=${EMBEDDING_DIM:-1024})"
-echo "  embedding 批大小: ${EMBEDDING_BATCH_SIZE:-10}   ← 百炼单次上限 10 行，不可调大"
+echo "  embedding 批大小: ${EMBEDDING_BATCH_SIZE:-10}   ← 供应商能力：百炼 10 / 智谱 64，设大了直接 400"
 echo
 
 command -v docker >/dev/null || { bad "docker 未安装"; exit 1; }
@@ -149,12 +169,13 @@ if echo "$PROBE" | grep -q 'EMBED_OK'; then
   fi
 else
   bad "Embedding 调用失败: $PROBE"
-  warn "常见原因：DASHSCOPE_API_KEY 无效 / 百炼服务未开通 / 模型名错误"
-  warn "建议：浏览器打开 https://bailian.console.aliyun.com/ 确认已开通并创建 API-KEY"
+  warn "常见原因：EMBEDDING_API_KEY 无效 / 该端点未开通向量化 / EMBEDDING_MODEL 名错误"
+  warn "若只配了一家供应商，请确认它【确实提供 embedding 接口】（如 DeepSeek 不提供）"
+  warn "另请核对 EMBEDDING_BASE_URL 的路径前缀：百炼 …/compatible-mode/v1，智谱 …/api/paas/v4"
 fi
 
 echo
-echo "  --- 验证 LLM 能否真正调用百炼 API ---"
+echo "  --- 验证 chat 能否真正调用云端 API ---"
 PROBE2=$(docker exec rag-api python -c "
 try:
     from app.llm import get_chat_model
@@ -167,11 +188,11 @@ if echo "$PROBE2" | grep -q 'LLM_OK'; then
   ok "LLM 调用成功: $(echo "$PROBE2" | sed 's/LLM_OK //')"
 else
   bad "LLM 调用失败: $PROBE2"
-  warn "常见原因：DASHSCOPE_API_KEY 无效 / 模型名 ${LLM_MODEL:-qwen-plus} 不可用 / 免费额度用尽"
+  warn "常见原因：LLM_API_KEY 无效 / 模型名 ${LLM_MODEL:-qwen-plus} 不属于该端点 / 额度用尽 / 账户欠费"
 fi
 
 echo
-echo "  --- 验证 embedding 分批逻辑（百炼 10 行上限）---"
+echo "  --- 验证 embedding 分批逻辑（按 EMBEDDING_BATCH_SIZE 分批）---"
 PROBE3=$(docker exec rag-api python -c "
 try:
     from app.llm import get_embeddings

@@ -2498,3 +2498,65 @@ docker compose up -d postgres   # volume 数据兼容，无需迁移
 # user_facts 表与已写入 facts：代码回滚后旧代码不读它们，留着无害；
 # 要彻底清掉则 DROP TABLE user_facts;（DROP EXTENSION vector 需先删表）
 ```
+
+# 第十七次变更：阶段 D 长期记忆② —— 主动建议（入口触发 + 采纳转任务 + 忽略去重，2026-10-16）
+
+## 1. 做了什么
+
+路线图 §阶段 D 的第二块，把「记住的东西」变成「主动说出口的建议」。
+
+- 新增 `backend/app/suggestion_store.py`：
+  - `suggestions` 表：`suggestion` / `reason`（依据）/ `kind`（study|job|health|life）/
+    `status`（CHECK 约束 pending|accepted|dismissed|expired）/ `created_at`。
+  - LLM 推断：把 user_facts 全量喂给轻量 LLM，推断 1~3 条「现在该做」的建议。
+  - 去重：`_recently_dismissed` 用 bigram 共词比例（≥0.5 判同类）跳过冷却期内 dismiss 过的建议。
+- 新增三个路由（均在 `tags=["记忆"]`）：
+  - `GET /api/suggestions` —— 入口触发：返回 pending；若无 pending 则现场推断一批再返回。
+  - `POST /api/suggestions/{id}/accept` —— 采纳：pending → accepted + 复用阶段 B 队列转 `suggestion_action` 任务。
+  - `POST /api/suggestions/{id}/dismiss` —— 忽略：pending → dismissed。
+- worker 新增 `suggestion_action` 执行器：把采纳的建议展开成可执行计划（LLM 生成），
+  作为任务结果返回，前端任务面板可读。
+- 前端新增 `SuggestionPanel.vue` + `useSuggestions.js`，挂在个人助手侧栏最上（比审批、审计更优先）。
+
+## 2. 关键设计决定
+
+1. **触发是「入口触发」，不是后台定时**。本机是「网页界面 + 单人 + 打开即用」，
+   没有手机推送通道。「后台生成建议」若不解决「怎么送到眼前」，就是一堆没人读的
+   笔记。所以触发点放在用户下一次打开页面时（前端 onMounted 拉 GET /api/suggestions，
+   后端无 pending 时现场推断）。保证建议一定在用户「在」的时候送达。
+2. **生成是「LLM 推断」，不引入独立待办登记**。user_facts 已有的偏好/习惯/话题
+   足够 LLM 推断「该复习了」「该投实习了」。显式带截止日期的事项登记是另一个功能
+   （偏待办/提醒），不在本模块范围，避免阶段 D ② 失控。
+3. **建议是候选，确认才转任务；忽略要记住不再重复**。建议不能自动执行。采纳 →
+   转 `agent_tasks`（复用阶段 B）；忽略 → dismissed，冷却期（7 天）内同类不再推送，
+   否则每次打开都弹一遍变成骚扰。
+4. **采纳与「转任务」解耦**：采纳本身是 `suggestions` 表的状态迁移，转任务依赖
+   队列可用；队列不可用时采纳仍生效，只跳过入队（记 info 日志），不让增强动作拖垮主链路。
+
+## 3. 踩过的坑
+
+1. **`.format()` 花括号转义**（与第十六次 fact_store 同源）：生成 prompt 里的 JSON 示例
+   `{"suggestion": ...}` 会被 `.format(facts_text=...)` 误当占位符，必须写成 `{{ }}`。
+   教训沿用：用 `.format()` 填充的模板，先扫一遍字面量花括号。
+2. **后台任务读不到 `.ssh` 密钥**：`docker compose build` 放后台（run_in_background）时，
+   沙箱拦掉 `.ssh/config` 与 key 的读取，导致 ssh 别名无法解析、公钥认证失败。而前台
+   执行会被 escalation 放行、正常读 config。结论：**需要 ssh 的长命令（构建/部署）必须前台跑**，
+   不能 run_in_background。这是环境约束，不是代码问题。
+
+## 4. 验收口径（11 项断言全 PASS）
+
+- 有 user_facts 时入口触发生成建议（LLM 从「在准备考研」推断出「复习计划拆解」等 study 建议 + 依据）。
+- 再次调用不重复生成（已有 pending 不再推断，防骚扰）。
+- 采纳 → accepted + 生成 `suggestion_action` 任务，worker 执行 succeeded（有 plan 产出）。
+- 忽略 → dismissed，同类建议冷却期内可被 `_recently_dismissed` 命中。
+- 重复采纳/忽略已终结建议返回 404（状态机终态不可变更）。
+- 全量回归 252 tests OK（新增 13 条 suggestion_store 测试，零回归）。
+
+## 5. 回滚
+
+```bash
+cd ~/phase1-rag
+git revert 513111a   # 代码层面回滚
+# suggestions 表与已写入建议：代码回滚后旧代码不读它们，留着无害；
+# 要彻底清掉则 DROP TABLE suggestions;
+```

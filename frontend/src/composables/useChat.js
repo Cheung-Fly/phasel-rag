@@ -180,6 +180,13 @@ export function useChat() {
               bot.pendingApproval = ev.approval || null;
               break;
 
+            case 'analysis_approval':
+              // 数据分析脚本审批（data_analysis）：同样共用审批卡片，
+              // 卡片展示「分析目标 + 脚本摘要」，批准后执行、回显统计结论。
+              // 与 shell_approval 同构 —— 都是「先批准才执行」的写操作。
+              bot.pendingApproval = ev.approval || null;
+              break;
+
             case 'token':
               if (tFirst === null) tFirst = performance.now();
               chunks++;

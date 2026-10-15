@@ -20,7 +20,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # + procps(ps/free/uptime) + findutils(find) + tar + unzip。
 # 这些都是 Debian slim 里默认已装或极小的包，不引入重量级依赖。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      coreutils procps findutils tar unzip ca-certificates && \
+      coreutils procps findutils tar unzip ca-certificates \
+      fonts-noto-cjk && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /shell
@@ -29,6 +30,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # ★ 分类器源码与 api 侧共用同一份：从 backend/app 复制进来。
 COPY app/shell_exec.py shell_exec.py
+COPY app/analysis_exec.py analysis_exec.py
 COPY shell/mcp_server.py shell/server.py ./
 
 RUN mkdir -p /work && useradd --create-home shelluser && \

@@ -42,6 +42,7 @@ from starlette.concurrency import run_in_threadpool
 from . import rag
 from .browser_agent import answer_browser_task
 from .shell_agent import answer_shell_task, intends_shell as _intends_shell
+from .analysis_agent import answer_analysis_task, intends_analysis as _intends_analysis
 from .approval_store import (
     STATUS_APPROVED,
     STATUS_EXECUTED,
@@ -675,7 +676,66 @@ def _answer_shell_task(
     return task
 
 
-# ---------------------------------------------------------------- 基础
+def _answer_analysis_task(
+    question: str,
+    user: AuthenticatedUser,
+    session_id: str = "",
+) -> dict:
+    """走一次数据分析任务，并把「待批准的分析脚本」登记成审批记录。
+
+    与 _answer_shell_task 平行：analysis 循环只产脚本，从不直接执行。
+    读表头（read_data_head）经 _call_shell_mcp 直接执行；
+    脚本在这里登记审批（action="data_analysis"），等用户批准后由
+    execute_operation 的 data_analysis 分支在 shell 沙箱执行。
+    """
+    from .analysis_exec import summarize_script
+
+    async def call_read_head(owner_user_id: str, name: str, arguments: dict) -> str:
+        if owner_user_id != user.user_id:
+            raise RuntimeError("Analysis task attempted to cross user boundary")
+        if name != "read_data_head":
+            raise RuntimeError("Analysis task attempted to call an unknown tool")
+        import json as _json
+
+        raw = await _call_shell_mcp("read_data_head", arguments)
+        return raw
+
+    task = answer_analysis_task(question, user.user_id, call_read_head)
+    task["analysis_approval"] = None
+
+    pending = task.pop("pending_analysis", None) or {}
+    script = pending.get("script")
+    if not script:
+        return task
+
+    store = get_approval_store_or_none()
+    if store is None:
+        logger.error("审批闸门不可用，本次分析脚本未被登记")
+        task["answer"] += "\n\n（审批闸门暂时不可用，本次没有登记可批准的分析脚本。）"
+        return task
+
+    try:
+        task["analysis_approval"] = store.create(
+            user.user_id,
+            target=pending.get("goal") or "数据分析脚本",
+            session_id=session_id,
+            action="data_analysis",
+            detail={
+                "script": script,
+                "summary": summarize_script(script),
+                "question": question[:200],
+            },
+        )
+    except ValueError as exc:
+        logger.error("分析审批登记被拒绝: %s", exc)
+        task["answer"] += f"\n\n（{exc}）"
+    except Exception as exc:
+        logger.error("分析审批登记失败: %s", type(exc).__name__)
+        task["answer"] += "\n\n（审批登记失败，本次没有可批准的分析脚本。）"
+    return task
+
+
+
 def _probe_chroma(s) -> str:
     """实时探测独立的 Chroma 服务。
 
@@ -1302,6 +1362,77 @@ async def _execute_shell_approval(
     return {"status": STATUS_FAILED, "reason": status or "unknown_status", "stdout": stdout}
 
 
+async def _execute_analysis_approval(
+    user: AuthenticatedUser,
+    approval_id: str,
+    approval: dict,
+    store,
+) -> dict:
+    """执行一段已批准的数据分析脚本，并把结果写回审批记录。
+
+    与 _execute_shell_approval 同构：这是「数据分析脚本」的唯一执行入口
+    （用户批准后触发）。脚本经 shell 容器第二道防线（run_analysis 工具
+    会再静态校验一遍）后才真正执行。
+    """
+    if not shell_breaker.allow():
+        raise HTTPException(502, "数据分析暂不可用，请稍后重试")
+
+    claimed = store.begin_execution(user.user_id, approval_id)
+    if claimed is None:
+        raise HTTPException(409, "该审批正在执行或已过期")
+
+    script = (claimed.get("detail") or {}).get("script") or ""
+    if not script:
+        store.complete_execution(
+            user.user_id, approval_id, outcome=STATUS_FAILED,
+            detail={"reason": "missing_script"},
+        )
+        return {"status": STATUS_FAILED, "reason": "missing_script", "stdout": ""}
+
+    try:
+        raw = await _call_shell_mcp("run_analysis", {"script": script})
+        import json as _json
+
+        result = _json.loads(raw)
+        if not isinstance(result, dict):
+            raise ValueError("invalid analysis result")
+    except Exception as exc:
+        logger.error("Analysis script execution failed: %s", type(exc).__name__)
+        store.complete_execution(
+            user.user_id, approval_id, outcome=STATUS_FAILED,
+            detail={"reason": "shell_unreachable"},
+        )
+        raise HTTPException(502, "数据分析脚本未能确认执行，请稍后重试") from exc
+
+    status = result.get("status")
+    exit_code = result.get("exit_code")
+    stdout = result.get("stdout", "")
+
+    if status == "executed":
+        store.complete_execution(
+            user.user_id, approval_id, outcome=STATUS_EXECUTED,
+            detail={"exit_code": exit_code, "stdout": stdout[:2000]},
+        )
+        return {"status": STATUS_EXECUTED, "exit_code": exit_code, "stdout": stdout}
+    if status == "timeout":
+        store.complete_execution(
+            user.user_id, approval_id, outcome=STATUS_FAILED,
+            detail={"reason": "timeout"},
+        )
+        return {"status": STATUS_FAILED, "reason": "timeout", "stdout": stdout}
+    if status in {"forbidden", "write_error", "not_found", "empty"}:
+        store.complete_execution(
+            user.user_id, approval_id, outcome=STATUS_FAILED,
+            detail={"reason": status},
+        )
+        return {"status": STATUS_FAILED, "reason": status, "stdout": stdout}
+    store.complete_execution(
+        user.user_id, approval_id, outcome=STATUS_FAILED,
+        detail={"reason": status or "unknown_status"},
+    )
+    return {"status": STATUS_FAILED, "reason": status or "unknown_status", "stdout": stdout}
+
+
 @app.get("/api/approvals", tags=["审批"], summary="列出待处理与最近的操作审批")
 def list_approvals(
     limit: int = Query(default=20, ge=1, le=100),
@@ -1384,9 +1515,12 @@ async def execute_operation(
         # 全走同一个响应：它们都不是「可以执行」的状态。
         raise HTTPException(409, "该审批尚未批准或已被处理")
 
-    # ★ 按 action 分流：run_shell 走终端执行，其余（click_element）走浏览器点击。
+    # ★ 按 action 分流：run_shell 走终端执行，data_analysis 走数据分析脚本执行，
+    #   其余（click_element）走浏览器点击。
     if approval["action"] == "run_shell":
         return await _execute_shell_approval(user, approval_id, approval, store)
+    if approval["action"] == "data_analysis":
+        return await _execute_analysis_approval(user, approval_id, approval, store)
 
     if not browser_breaker.allow():
         # 电路已断开 ⇒ 请求根本没发出去，点击不可能发生 ⇒ 审批保持 approved，
@@ -1741,6 +1875,22 @@ def chat(
                 "session_id": session_id,
                 "browser_session_active": browser_session_active,
             }
+        # analysis 意图路由（阶段 D 之后新增，对标 Muse「按需造工具」）：
+        # 问题明确要求「分析本地数据文件」时走 analysis 循环。
+        if _intends_analysis(req.question):
+            analysis_task = _answer_analysis_task(req.question, user, session_id)
+            get_memory().append_for_user(
+                user.user_id, session_id, req.question, analysis_task["answer"]
+            )
+            _enqueue_fact_extraction(
+                user.user_id, session_id, req.question, analysis_task["answer"]
+            )
+            return {
+                "answer": analysis_task["answer"],
+                "sources": [],
+                "session_id": session_id,
+                "analysis_approval": analysis_task["analysis_approval"],
+            }
         # shell 意图路由（阶段 C 之后新增）：问题明确要求执行 Linux 命令时
         # 走 shell 循环，否则维持原浏览器路径。判断靠 LLM 而非关键词。
         if _intends_shell(req.question):
@@ -1835,6 +1985,20 @@ def chat_stream(
                     get_memory().append_for_user(user.user_id, session_id, req.question, answer)
                     _enqueue_fact_extraction(user.user_id, session_id, req.question, answer)
                     yield sse({"type": "token", "text": answer})
+                    yield sse({"type": "done", "session_id": session_id})
+                    return
+                # analysis 意图路由（与 /api/chat 的 student 分支一致）。
+                if _intends_analysis(req.question):
+                    analysis_task = _answer_analysis_task(req.question, user, session_id)
+                    if analysis_task["analysis_approval"]:
+                        yield sse({"type": "analysis_approval", "approval": analysis_task["analysis_approval"]})
+                    get_memory().append_for_user(
+                        user.user_id, session_id, req.question, analysis_task["answer"]
+                    )
+                    _enqueue_fact_extraction(
+                        user.user_id, session_id, req.question, analysis_task["answer"]
+                    )
+                    yield sse({"type": "token", "text": analysis_task["answer"]})
                     yield sse({"type": "done", "session_id": session_id})
                     return
                 # shell 意图路由（与 /api/chat 的 student 分支一致）。

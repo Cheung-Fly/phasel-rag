@@ -779,7 +779,7 @@ frontend 的 3 MiB 就是这次决策的全部代价 —— 用这点内存换�
 |---|---|
 | 起/更新全栈 | `docker compose up -d` |
 | 只看前端 | `docker compose up -d frontend` / `docker compose restart frontend` / `docker compose stop frontend` |
-| 改完 nginx 配置热载 | `docker compose exec frontend nginx -s reload` |
+| 改完 nginx 配置热载 | `docker compose exec frontend nginx -s reload`（★ 2026-10-14 起挂载已改为整个 `deploy/` 目录，热载可靠；此前挂单文件时它会静默失效，见第八次变更 §4） |
 | ~~改前端文件~~ | ~~直接改宿主机 `./frontend/*`，无需任何重启~~（第六次变更后已失效） |
 | 看前端日志 | `docker compose logs -f --tail=100 frontend` |
 
@@ -1124,7 +1124,7 @@ PASS  提示条已显示
 | **改完前端后重建** | `docker compose up -d --build frontend` |
 | 只重建前端镜像 | `docker compose build frontend` |
 | 停/起前端 | `docker compose stop frontend` / `docker compose start frontend` |
-| 改完 nginx 配置热载 | `docker compose exec frontend nginx -s reload` |
+| 改完 nginx 配置热载 | `docker compose exec frontend nginx -s reload`（★ 2026-10-14 起挂载已改为整个 `deploy/` 目录，热载可靠；此前挂单文件时它会静默失效，见第八次变更 §4） |
 | 看前端日志 | `docker compose logs -f --tail=100 frontend` |
 | 本地开发（需 node） | `cd frontend && npm install && npm run dev` → `http://localhost:5173` |
 | 开发期连服务器后端 | 先 `ssh -L 8000:127.0.0.1:8000 azureuser@<IP> -N`，再 `npm run dev` |
@@ -1137,3 +1137,1364 @@ PASS  提示条已显示
 | 访问 `8000/ui/` 看页面 | ❌ 404，api 不再托管前端 |
 | `docker compose exec frontend nginx -s reload` 之外的热更新手段 | 无 |
 
+---
+
+# 第七次变更：取消登录界面，改为单用户本地模式（2026-10-14）
+
+> 目标机：`rag-vm` / `azureuser@20.89.90.58`
+> 记录人：WorkBuddy（受用户委托执行）
+> 目标：把「个人校园助手」推向「Muse 类个人助手」的第一步 —— 去掉登录，
+> 让它成为打开即用的本机应用。整体路线见 `docs/Muse化路线图.md`。
+
+## 1. 一句话
+
+新增 `AUTH_MODE`（`session` | `local`）配置项：置为 `local` 时后端不再要求会话 cookie，
+所有请求自动归属到 `LOCAL_OWNER_USERNAME` 指定的身份，前端一并删掉登录表单与退出按钮。
+
+## 2. 动机：为什么不是「把 auth 代码删掉」
+
+「取消登录」最直觉的做法是删掉 `auth_store.py`、摘掉 20 处 `Depends(_current_user)`、
+把 `user_id` 从 rag / memory / browser 里抽走。这条路**看起来干净，实际最危险**：
+
+| 做法 | 后果 |
+|---|---|
+| 删掉 owner 隔离 | 向量片段、会话、凭证都带 `owner_user_id`，外键指向 `app_users`。删掉隔离意味着要么外键插入失败，要么删表 —— 而现存数据是按 owner 存的，删了隔离它们就「全不见」 |
+| 删掉 `auth_store` | 加密凭证库（Fernet + 审计表）也在这个模块里。删它等于连同「东软凭证保险箱」一起删 |
+
+所以采用**保留隔离、只换身份来源**：`_current_user` 在 local 模式下返回一个固定的
+「本机主人」，下游一行不改。**这是本次能做到零数据迁移的原因。**
+
+## 3. 关键决策
+
+### 3.1 本地身份必须复用 `admin`，不能另起一个用户名
+
+改造前库里已有数据：
+
+| 数据 | 归属 | 换 identity 的后果 |
+|---|---|---|
+| 知识库文档（4 片段） | `owner_user_id = "shared"` | 无影响（shared 对谁可见） |
+| 会话（4 个） | `admin`（`0f9d3a56…`） | 全部看不见 |
+| 东软凭证（1 条） | `admin` | **校园自动登录直接失效** |
+| 会话（3 个） | `NULL`（owner 隔离上线前的遗留） | 对谁都不可见，本次不动 |
+
+因此 `LOCAL_OWNER_USERNAME=admin`。**这不是可选的**：若写成 `owner` 之类的新名字，
+`ensure_local_owner` 会新建一个用户，界面上的表现是「知识库还在、但会话和凭证全空了」，
+极容易被误判为数据丢失。
+
+### 3.2 代码默认值仍是 `session`（安全默认）
+
+`config.py` 里 `auth_mode` 默认 `session`，免登录只在 `.env` 里显式写 `AUTH_MODE=local` 才生效。
+理由：默认值会在「忘了配 .env」这种最常见的部署事故里生效 —— 默认 local 意味着一次疏忽
+就得到一个无鉴权服务；默认 session 最坏只是「要登录」。
+
+### 3.3 local 模式下 `login` / `logout` 返回 404，而不是 200
+
+不能只靠「前端不再调用」。一个仍能签发会话、但会话又被 `_current_user` 完全忽略的接口，
+会让调用方（含未来的自己）误以为「登录成功了但界面没变」。返回 404 让这条自相矛盾的
+状态无法出现。
+
+### 3.4 前端仍然保留一次 `/api/auth/me` 调用
+
+看起来「都不用登录了为什么还要问身份」。原因：`user_id` 是 localStorage 命名空间的一部分
+（`rag.<user_id>.sessions` / `.currentSession`，见 `lib/storage.js`）。跳过它等于
+让本地索引换一个命名空间，用户会看到「历史会话全没了」。
+所以这次调用保留，但失败语义变了：不再是「去登录」，而是「后端没起来」→ 展示可重试的错误页。
+
+## 4. 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `backend/app/config.py` | 新增 `auth_mode`（含取值校验，写错启动即报错）、`local_owner_username`、`is_local_auth` 属性 |
+| `backend/app/auth_store.py` | 新增 `ensure_local_owner()`：`INSERT ... ON CONFLICT DO NOTHING` + 回查，幂等；口令写随机值（`password_hash` 非空约束） |
+| `backend/app/main.py` | 新增 `_auth_mode()`（运行时读取，可被测试 patch）与 `_local_owner()`（进程内缓存）；`_current_user` 增加 local 分支；`login`/`logout` 在 local 模式返回 404；startup 预热本地身份 |
+| `frontend/src/App.vue` | 删除登录表单、用户名/密码状态、`login()`/`logout()`；改为 `bootstrap()` + 可重试错误页；删除已无用的 `watch` 导入与表单 CSS |
+| `frontend/src/components/ChatPanel.vue` | 删除「退出」按钮与 `logout` 事件 |
+| `frontend/src/lib/api.js` | 删除 `authLogin` / `authLogout`（不再有调用方）；保留 `authMe` |
+| `backend/tests/test_auth_store.py` | 原集成测试**显式钉死 `auth_mode="session"`**（否则部署成 local 时它的 401 断言会失去意义）；新增 `LocalSingleUserModeTests` 三个用例 |
+| `.env.example` | 新增认证模式段（含「仅本机单人」的前提说明） |
+| `docs/Muse化路线图.md` | 新增：Muse 能力对照、现状盘点、阶段 B~E 路线与验收口径 |
+
+## 5. 执行中踩到的坑（如实记录）
+
+### 5.1 ★ 变量名与函数名同名，导致启动直接失败
+
+`main.py` 里我最初写的是：
+
+```python
+_local_owner: AuthenticatedUser | None = None      # 缓存变量
+def _local_owner() -> AuthenticatedUser: ...       # 同名函数
+```
+
+`def` 在模块导入时**把全局名 `_local_owner` 重绑成了函数对象**，于是：
+
+- `if _local_owner is None:` 永假 → `ensure_local_owner()` 从未被调用
+- `return _local_owner` 返回的是**函数本身**
+
+现象是容器启动即 `AttributeError: 'function' object has no attribute 'username'`，
+`restart: unless-stopped` 让它无限重启。
+
+**这个错误 `python -m py_compile` 查不出来**（语法完全合法），只有真的启动才会暴露。
+已改名 `_local_owner_cache`。
+
+**教训**：同一个模块里「缓存变量」与「取缓存的函数」不要用同一个名字。
+同类错误的通用判据是：模块级全局名如果同时被 `def`/`class` 绑定过，那它就不再是你赋的那个值。
+
+## 6. 验收（全部实测）
+
+### 6.1 接口行为（经 nginx 正式入口 127.0.0.1:8080）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | `GET /api/auth/me`（不带任何 cookie） | **HTTP 200** `{"authenticated":true,"username":"admin","user_id":"0f9d3a56-76c1-4dc7-9695-c8ad01959bfc"}` |
+| 2 | `POST /api/auth/login` | HTTP 404 `{"detail":"单用户本地模式未启用账号登录"}` |
+| 3 | `POST /api/auth/logout` | HTTP 404 `{"detail":"单用户本地模式没有登录会话"}` |
+| 4 | `GET /api/documents` | HTTP 200，含 `成都东软学院-学校概况.md`（shared） |
+| 5 | `GET /api/credentials` | **HTTP 200，东软智慧教育平台凭证仍在** ← 零迁移的关键证据 |
+| 6 | `GET /api/sessions?assistant_mode=school` | HTTP 200，1 条（`列出资料`，5 轮） |
+| 7 | `GET /api/sessions?assistant_mode=student` | HTTP 200，3 条（均 `登录智慧教育平台`） |
+| 8 | 启动日志 | `认证模式 local（免登录）：本机主人身份 = admin (user_id=0f9d3a56-…)` |
+
+### 6.2 真实浏览器渲染（Chrome headless，经 SSH 隧道访问真实入口）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 9 | 首页 | HTTP 200，1604 B，引用 `/assets/index-CEzvIN46.js` |
+| 10 | 渲染后 DOM 中 `input[type=password]` | **0 个** |
+| 11 | 渲染后 DOM 中「登录」相关文案 | **0 处** |
+| 12 | 主界面已渲染 | `sidebar` / `assistant-tabs` / `了解学校` / `个人助手` / `新会话` / `chat` 全部命中 |
+| 13 | 顶栏「退出」按钮 | 已消失（只剩「新会话」） |
+| 14 | **真实数据加载（核心）** | DOM 中出现 `成都东软学院-学校概况.md`（文档列表）、`列出资料 · 5 轮`（会话历史）、健康状态 `qwen-plus / postgres+redis` —— 全链路 浏览器→nginx→api→Chroma/PG 无登录打通 |
+| 15 | 截图 | 见验证产物（首页直接进入主界面，无任何登录屏） |
+
+### 6.3 构建产物与测试
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 16 | 前端镜像构建 | 成功；bundle 中 `登录个人校园助手`/`个人助手用户名`/`authLogin`/`authLogout`/`退出个人助手`/`请先登录` 均 **0 次**；`正在启动本机助手`/`无法连接到本机助手` / `api/auth/me` 各 1 次 |
+| 17 | 后端测试套件（容器内实跑） | **40 tests, OK**（含原有 session 隔离用例 + 新增 3 个 local 用例） |
+| 18 | `docker compose config --quiet` | 通过 |
+| 19 | 六容器状态 | 全部 `Up (healthy)` |
+
+### 6.4 数据未被污染
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 20 | `app_users` | 仅 `admin` / `test` 两行，测试用户已清理 |
+| 21 | `encrypted_credentials` | 仍归属 `admin`，`nsu-smart-education` / 东软智慧教育平台 |
+| 22 | `sessions` | 7 行（4 行有 owner + 3 行历史遗留 NULL），未被改动 |
+| 23 | Chroma 向量片段 | 仍为 **4** 片，全部 `owner_user_id=shared`，文件仍只有成都东软学院那份 |
+
+## 7. 已知问题 / 遗留
+
+| 项 | 说明 | 处置 |
+|---|---|---|
+| **「恢复上次会话」实际不生效**（既有 bug，非本次引入） | `App.vue` 启动流程里 `setCurrent(null)` 会**删掉** localStorage 里的 currentSession，紧接着 `initializeApplication()` 又去 `getCurrent()` 读它 —— 必然读到 null，于是永远显示欢迎语。实测印证：会话列表里有「列出资料 5 轮」，但对话区显示的是欢迎语。本次**只做等价搬移，未顺手修**（属行为变更，应单独评审） | 待确认后单独立项修复 |
+| **local 模式无鉴权** | 免登录 = 服务不再校验任何身份。仅对「端口只绑 127.0.0.1 + 经 SSH 隧道 + 单人使用」成立 | 公网部署 / 多人使用前必须切回 `AUTH_MODE=session` |
+| 会话列表仍有 3 条 `owner_user_id IS NULL` 的遗留 | owner 隔离上线前的数据，对任何身份都不可见 | 不清理（无害），若要清理需先确认是否为有价值的历史 |
+| `.env` 中的 `AUTH_MODE` 与代码默认值不一致（本机 local / 代码 session） | 这是有意的：代码给安全默认，部署显式选择 | 无 |
+
+## 8. 回滚
+
+```bash
+cd ~/phase1-rag
+
+# 方式一（最小、推荐）：只改配置，不动代码
+sed -i '/^AUTH_MODE=/d; /^LOCAL_OWNER_USERNAME=/d' .env
+docker compose up -d --force-recreate api
+# → 立刻回到需要登录的原行为（登录界面前端仍在旧镜像里，见方式二）
+
+# 方式二：连代码与前端一起回退
+cp ~/backups/pre-localmode-20261014-211954/changed-files-before.tar.gz /tmp/
+tar xzf /tmp/changed-files-before.tar.gz -C ~/phase1-rag
+cp ~/phase1-rag/.env.bak-localmode ~/phase1-rag/.env
+docker compose up -d --build api frontend
+```
+
+改动前快照：`~/backups/pre-localmode-20261014-211954/changed-files-before.tar.gz`
+（含 `main.py` / `config.py` / `auth_store.py` / `test_auth_store.py` / `App.vue` /
+`ChatPanel.vue` / `api.js` / `.env.example` / `.env`），另有 `.env.bak-localmode`。
+
+## 9. 日常命令差异
+
+| 目的 | 命令 | 说明 |
+|---|---|---|
+| 改回需要登录 | 删掉 `.env` 里的 `AUTH_MODE`，`docker compose up -d --force-recreate api` | 代码默认即 session，无需改码 |
+| 切换本地身份 | 改 `.env` 的 `LOCAL_OWNER_USERNAME` 后重建 api | ⚠️ 换名字等于换 owner，界面会「看起来数据全空」 |
+| 跑后端测试 | 见下方一条命令 | api 镜像里不含 `tests/`，需挂载 |
+
+```bash
+# 后端测试（在容器内跑，因宿主无 Python 依赖环境）
+NET=$(docker inspect rag-postgres --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}
+{{end}}' | head -1)
+docker run --rm --network "$NET" --env-file .env \
+  -v "$PWD/backend/tests:/app/tests:ro" -w /app \
+  phase1-rag-api:0.1.0 python -m unittest discover -s tests -p 'test_*.py'
+```
+
+---
+
+# 第八次变更：nginx 来源校验（让「误改端口」不再是明文泄露）+ 修掉一个会让配置静默失效的挂载陷阱
+
+> 时间：2026-10-14
+> 起因：阶段 E 分发形态定稿后复盘 `AUTH_MODE=local` 的安全边界（详见 `Muse化路线图.md` §5.2）。
+
+## 1. 一句话
+
+`local` 模式下后端不做任何鉴权，访问控制此前**完全依赖**「端口只绑 `127.0.0.1`」这一条；
+本次在 nginx 层补上来源校验，使「有人为了手机也能连而把端口改成 `0.0.0.0`」变成 403。
+实施过程中还发现并修掉了一个会让 nginx 配置**静默不生效**的挂载陷阱。
+
+## 2. 动机（读码确认的威胁面）
+
+| 事实 | 位置 |
+|---|---|
+| `_current_user` 对任何请求都直接返回本地主人，无鉴权 | `backend/app/main.py` |
+| `GET /api/credentials` 可列出全部凭证 ID | 同上 |
+| `GET /api/credentials/{credential_id}` 返回**明文口令** | `auth_store.py:487-516` |
+
+三者叠加：端口一旦被改成 `0.0.0.0`，等于在局域网公开一个「列口令清单 + 读明文」的接口。
+本次目标不是改掉该接口的返回行为（它被 `test_auth_store.py:159` 钉死，属产品决策），
+而是**让这种误配置不成立**。
+
+## 3. 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `deploy/nginx-frontend.conf` | server 块新增：`allow 127.0.0.0/8; allow 172.16.0.0/12; deny all;` |
+| `docker-compose.yml` | frontend 挂载由「单个文件」改为「整个 `deploy/` 目录」 |
+| `deploy/nginx-frontend.conf` 头注释 | 修正「改完 reload 即可」的说法，并给出「必须确认容器内是新内容」的收工检查 |
+
+## 4. ★ 执行中踩到的坑：挂单个文件时，容器持有的是当时的 inode
+
+第一次实施后，`nginx -t` 通过、`nginx -s reload` 报告成功、`curl` 首页 200 —— 三处都正常，
+看起来已经生效。但用一台 `192.168.77.0/24` 的隔离网络做反向验证时，来源 `192.168.77.3`
+拿到了 **200**，守卫根本没生效。
+
+| 位置 | inode | 字节数 |
+|---|---|---|
+| 宿主机 `deploy/nginx-frontend.conf` | 786623 | 8583 |
+| 容器内 `/etc/nginx/conf.d/default.conf` | 803397 | 6768 |
+
+根因：`tar` 解包会 unlink 后重建文件 → inode 变了，而**单文件 bind mount 挂的是旧 inode**。
+于是 `nginx -t` 校验的是旧配置、`reload` 加载的也是旧配置，全程零报错。
+
+**修法**：改为挂整个目录（`./deploy:/etc/nginx/conf.d:ro`）。目录挂载按路径查找，
+目录内文件被替换后立即可见。附带影响：容器内配置文件名变为 `nginx-frontend.conf`
+（仍是 `*.conf`，会被加载），镜像自带的 `default.conf` 同时被遮蔽。
+
+**教训（两条，都值得记住）**：
+1. **「配置已生效」不能用 `nginx -t` 通过来证明**，必须验证容器内看到的内容。
+2. **反向用例比正向用例更能发现「改动没生效」** —— 正向用例在改动完全没生效时同样是绿的。
+   本次若只测「合法访问仍 200」，会得到一个完全错误的安全结论。
+
+## 5. 验收（全部实测）
+
+| 项 | 结果 |
+|---|---|
+| 容器内确认为新配置 | `allow` 2 条、`deny all` 1 条、9168 字节（与宿主机一致） |
+| `nginx -t` | configuration file syntax is ok |
+| 合法路径（宿主机 → `127.0.0.1:8080`） | `/` 200、`/api/auth/me` 200、`/health` 200 |
+| 容器 healthcheck（容器内 `127.0.0.1`） | `rag-frontend` healthy，未受影响 |
+| **对照组**：来源在 compose 网段（172.x） | 200 放行 |
+| **实验组**：来源 `192.168.77.0/24` | `/` 403、`/api/auth/me` 403、`/api/credentials` 403 |
+| nginx 日志 | `access forbidden by rule, client: 192.168.77.3` |
+| 真实浏览器渲染（Chrome headless + SSH 隧道） | DOM 与加门禁前**逐字节一致**（4955 字节），截图无变化，无登录表单 |
+
+## 6. 已知缺口（不要当成完备）
+
+| # | 缺口 |
+|---|---|
+| 1 | `api:8000` 是独立的端口发布路径，不经过 nginx，本次未加守卫 |
+| 2 | 局域网若使用 `172.16.0.0/12`（少见；多为 `192.168.x` 或 `10.x`），该来源会被放行 |
+| 3 | 本层防的是**误配置**，不防能直接访问宿主机网络栈的定向攻击 |
+| 4 | ~~`/api/credentials/{id}` 仍返回明文口令，行为被既有测试钉死，未擅改~~ → **已在第九次变更解决**：默认脱敏 + 显式 `POST /api/credentials/{id}/reveal` |
+
+## 7. 回滚
+
+删掉 `deploy/nginx-frontend.conf` 里的 `allow`/`deny` 三行即可（挂载方式的改动是独立修复，可保留）。
+注意：改完必须 `docker compose restart frontend`，或至少确认容器内内容 —— 不要只 `reload`。
+
+## 8. 日常命令差异
+
+| 目的 | 命令 |
+|---|---|
+| 改 nginx 配置后生效 | `docker compose exec frontend nginx -s reload` |
+| ★ 确认容器内就是新内容（收工必做） | `docker exec rag-frontend grep -c <新关键字> /etc/nginx/conf.d/nginx-frontend.conf` |
+| 容器内配置文件路径 | `/etc/nginx/conf.d/nginx-frontend.conf`（不再是 `default.conf`） |
+
+---
+
+# 第九次变更：凭证详情接口默认脱敏，取明文改走显式 `POST /reveal`
+
+> 时间：2026-10-14
+> 起因：第八次变更「已知缺口 #4」—— `/api/credentials/{id}` 返回明文口令，行为被既有测试钉死，当时判断属产品决策、未擅改。
+
+## 1. 一句话
+
+凭证详情接口不再回传口令明文（返回固定掩码，并带 `password_revealed: false`）；
+需要明文时调 `POST /api/credentials/{id}/reveal`，该动作在审计里记为 `reveal`。
+**全项目唯一真正需要明文的调用点（浏览器自动登录）已显式声明，并加了防御断言，杜绝掩码被当成口令提交。**
+
+## 2. 动机：这不是「改掉一个产品行为」，而是拆掉一个纯暴露面
+
+第八次变更时我把这条留给你决策，理由是「`test_auth_store.py:159` 钉死了它，说明是有意为之」。
+读码复核后可以确认：**这个接口没有任何消费方。**
+
+| 事实 | 位置 |
+|---|---|
+| 前端全仓没有调用 `/api/credentials/{id}`（只有 fetch 的 `credentials: 'same-origin'` 选项） | `frontend/src` 全仓检索 |
+| 真正需要解密口令的是服务端内部路径，不经过 HTTP | `main.py:_execute_login_tool` 直接调 `auth_store.get_credential()` |
+
+所以「被测试钉死」钉住的其实是一个**功能上不必要的暴露面**：它让「端口误暴露」的后果
+从「泄露元数据」升级为「泄露可直接使用的口令」。
+
+## 3. 设计：默认脱敏，而不是默认明文 + 遮蔽开关
+
+`get_credential()` 的默认返回值是脱敏的；取明文必须显式传 `reveal_password=True`。
+方向是刻意选的：
+
+| 方向 | 忘记传参数的后果 |
+|---|---|
+| ❌ 默认明文 + `mask=True` | **静默泄露**。新调用点只要忘了加参数，就多一个返回明文的接口，且不会有任何报错 |
+| ✅ 默认脱敏 + `reveal_password=True` | **功能失败**。新调用点拿不到口令，自动登录会失败 —— 问题会暴露，属安全的失败方向 |
+
+配套两点：
+
+1. **脱敏路径连密文都不解密** —— 既然不会用到明文，就没必要把它解出来放进内存。
+2. **返回 `password_revealed` 标记** —— 让「当前是不是明文」在数据里可见，调用方可以据此断言，
+   而不必靠猜那个 `********` 到底是真口令还是掩码。
+
+## 4. 为什么取明文用 POST，而不是 `GET ?reveal=true`
+
+第一条是硬约束，第二条是惯例：
+
+1. 中间件给敏感响应加了 `Cache-Control: no-store`，但**管不住访问日志**。nginx 记的是 `$request`，
+   包含 query string。用 GET 会让每次取明文在日志里留下 `.../api/credentials/xxx?reveal=true`，
+   等于亲手制造一个新的可观测泄露面。
+2. 「把口令取出来」是一次敏感操作，语义上属于动作而非查询；项目对浏览器会话操作的既有约定
+   也是 POST（`/api/browser-session/action`）。
+
+## 5. 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `backend/app/auth_store.py` | 新增 `MASKED_PASSWORD`；`get_credential()` 增加仅关键字参数 `reveal_password=False`；脱敏时跳过口令解密；审计动作按 `read`/`reveal` 区分；新增 schema 迁移（见 §6） |
+| `backend/app/main.py` | `GET /api/credentials/{id}` 改为返回脱敏视图（路径与响应形状不变）；**新增** `POST /api/credentials/{id}/reveal`；`_execute_login_tool` 显式 `reveal_password=True` 并加防御断言 |
+| `backend/tests/test_auth_store.py` | 原「详情接口必须返回明文」断言改为「默认脱敏 + reveal 取明文」；新增脱敏彻底性、跨用户 reveal 404、审计动作可区分 |
+| `backend/tests/test_browser_login.py` | mock 接受 `reveal_password` 关键字；新增用例钉住「漏传 reveal 时必须安全失败」 |
+
+## 6. ★ 执行中踩到的坑：CHECK 约束会让新审计动作插不进去
+
+`credential_audit.action` 上有 CHECK 约束：
+
+```sql
+CHECK (action IN ('create', 'read', 'update', 'delete'))
+```
+
+它是**匿名约束**，PostgreSQL 自动命名为 `credential_audit_action_check`（已在库中用 `\d` 确认）。
+
+问题在于 `CREATE TABLE IF NOT EXISTS` 对已存在的表**完全不起作用** —— 只改建表语句，
+旧库的约束依然是旧版本。不管它的话，插入 `'reveal'` 会被数据库拒绝，
+表现是**取明文接口直接 503**，而不是一个容易看懂的报错。
+
+幂等迁移写法：把两种可能的名字都 DROP 掉，再重建显式命名的约束。
+
+```sql
+ALTER TABLE credential_audit DROP CONSTRAINT IF EXISTS credential_audit_action_check;
+ALTER TABLE credential_audit DROP CONSTRAINT IF EXISTS ck_credential_audit_action;
+ALTER TABLE credential_audit ADD CONSTRAINT ck_credential_audit_action
+  CHECK (action IN ('create', 'read', 'update', 'delete', 'reveal'));
+```
+
+先删后加：重复启动不会因「约束已存在」而失败。
+
+**顺带一条验证方法上的教训**：光看到「GET 详情返回 200 且没有明文」不足以证明脱敏生效 ——
+如果接口被改坏（比如抛异常返回空、或 reveal 路径也一起坏了），观测结果同样是「没有明文」。
+必须**成对验证**：脱敏路径拿不到明文 **且** reveal 路径仍拿得到明文。
+这与第八次变更的教训是同一回事 —— 只有正向断言时，「改动没生效」和「改动生效」可能给出相同观测。
+
+## 7. 验收（全部实测，2026-10-14）
+
+| 项 | 结果 |
+|---|---|
+| `GET /api/credentials/{id}` | HTTP 200，`password_revealed=false`，`password` 为掩码，响应体中不含明文 |
+| `POST /api/credentials/{id}/reveal` | HTTP 200，`password_revealed=true`，返回真口令（与非掩码值不同、长度 10） |
+| `POST /api/credentials/{不存在}/reveal` | HTTP 404 `未找到该校园账号` |
+| 缓存头（**两条路径分别验证**） | 直连 `api:8000` 与经 `nginx:8080` 均返回 `cache-control: no-store` + `pragma: no-cache` |
+| 审计表 | 取明文后新增一条 `reveal` 记录；动作分布 `create 1 / read 29 / reveal 1` |
+| **schema 迁移** | 约束已变为 `ck_credential_audit_action` 且定义含 `reveal`；旧的匿名 `credential_audit_action_check` 已不存在 |
+| 后端测试 | **41/41 OK**（新增 1 个防御用例，总数由 40 → 41）；用例运行日志中可见防御断言被真实触发 |
+| 前端真实渲染（Chrome headless + SSH 隧道） | DOM **4955 字节，与改动前逐字节一致**；无 `input[type=password]`；侧栏正常 |
+
+## 8. 残余风险（这层防不住什么）
+
+| # | 缺口 |
+|---|---|
+| 1 | **元数据仍是可读 PII**：`account` / `student_id` / `full_name` / `site_url` 照常返回。本次只掩码了 password |
+| 2 | **历史审计无法区分**：迁移前那 26 条 `read` 里混着「脱敏读」与「明文读」，无法回溯重分类。新记录才可区分 |
+| 3 | 本层与第八次变更的 nginx 来源校验互补，但都不防能直接访问宿主机网络栈的定向攻击 |
+
+## 9. 回滚
+
+改回「详情接口直接返回 `reveal_password=True` 的结果」即可退回到旧行为（不建议）。
+注意：**审计动作的 CHECK 约束迁移不要回滚** —— 表里已经存在 `reveal` 行，
+把约束改回 4 个动作会让这些历史行变成非法数据。
+
+## 10. 日常命令差异
+
+| 目的 | 命令 |
+|---|---|
+| 查看脱敏是否生效 | `curl -s http://127.0.0.1:8080/api/credentials/<id>` → `password` 应为 `********` |
+| 显式取明文 | `curl -s -X POST http://127.0.0.1:8080/api/credentials/<id>/reveal` |
+| 查取证操作记录 | `docker exec rag-postgres psql -U rag -d ragdb -c "SELECT action, count(*) FROM credential_audit GROUP BY 1;"` |
+
+
+---
+
+# 第十次变更：供应商凭证解耦（chat 与 embedding 分家）+ 接入智谱 GLM
+
+> 时间：2026-10-15
+> 起因：阿里云百炼账户欠费，**chat 与 embedding 全线**返回 400 `Arrearage`
+> （实测 `docker exec rag-api python -c "...get_chat_model().invoke(...)"` → `CHAT_FAIL 400`，
+> 即不只是向量化挂了，对话也挂了）。
+> 由于原实现里两者**共用同一把 key 与 base_url**，想换任何供应商都必须先做解耦 ——
+> 否则「换成一家只有 chat 的服务（如 DeepSeek）」这条路根本走不通。
+
+## 1. 一句话
+
+把「一个 key 同时用于 chat 和 embedding」改成**两条独立可配的链路**，
+并保留旧变量 `DASHSCOPE_*` 作为回退，使既有 `.env` 不改也能跑。
+
+## 2. 改动面（全量，含一个隐藏引用点）
+
+| 文件 | 改动 |
+|---|---|
+| `backend/app/config.py` | 新增 `LLM_API_KEY` / `LLM_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_BASE_URL`；`dashscope_*` 降级为回退；新增 `_resolve_provider_credentials()`（`model_validator(mode="after")`）做回填 |
+| `backend/app/llm.py` | 两个工厂各读各自字段；错误信息中性化并同时列出新旧变量名；新增 `_safe_endpoint()` 只回显主机（避免把 URL 内嵌的凭据写进日志） |
+| `backend/evaluation/evaluate_ragas.py` | **隐藏引用点**：`settings.dashscope_*` → `settings.llm_*`。漏改即为半迁移（评测判官模型会拿到空 key） |
+| `.env.example` | 改为新变量名；旧写法降级为「示例 B」并标注仍可用 |
+| `deploy.sh` | 凭证检查按**与 app 完全相同的回退链**解析；打印端点时标注「与 chat 是否同源」 |
+| `backend/tests/test_llm_provider_config.py` | **新增 10 条离线单测**（回退链 / 解耦 / 失败方向 / 空白裁剪 / 跨端点告警） |
+
+## 3. 回退链（单一真相源）
+
+实现位置在 `config.Settings._resolve_provider_credentials()`，**刻意不放在 llm.py**。
+理由：回退若散落在各调用点，就会出现「`/health` 报的是 A 供应商、请求实际打到 B 供应商」
+这类最难查的分裂。
+
+```
+llm_api_key        ← LLM_API_KEY        ‖ DASHSCOPE_API_KEY
+llm_base_url       ← LLM_BASE_URL       ‖ DASHSCOPE_BASE_URL
+embedding_api_key  ← EMBEDDING_API_KEY  ‖ llm_api_key
+embedding_base_url ← EMBEDDING_BASE_URL ‖ llm_base_url
+```
+
+### ★ 一个刻意的行为改动（以及为什么必须改）
+
+`dashscope_base_url` 的**字段默认值**由 `https://dashscope.aliyuncs.com/compatible-mode/v1`
+改为**空串**，旧行为改由常量 `_LEGACY_DASHSCOPE_BASE_URL` 在「检测到 `DASHSCOPE_API_KEY`」时显式重建。
+
+不改的后果：新用户只填 `LLM_API_KEY`（比如智谱的 key）而忘填 `LLM_BASE_URL` 时，
+会**静默**拿到百炼的默认地址 → 把智谱的 key 发给百炼 → 401，
+而错误信息里不含任何「base_url 不对」的线索。
+改成空串后，同一种失误会得到一个指名道姓的 `RuntimeError`（安全的失败方向）。
+
+## 4. 迁移（服务器 `.env`）
+
+**就地手术式改写，不重建文件** —— 重建会丢掉只在服务器上存在的
+`CREDENTIAL_ENCRYPTION_KEY`、`POSTGRES_PASSWORD` 等密钥（本地那份 `.env` 是过期副本）。
+
+- 备份：`.env.bak-20261015134818-predcople`（权限 600）
+- 旧的 `DASHSCOPE_API_KEY` / `DASHSCOPE_BASE_URL` 改为**注释保留备查**，不再生效
+- 新增/替换：`LLM_API_KEY`、`LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4`、
+  `LLM_MODEL=glm-4-flash`、`EMBEDDING_MODEL=embedding-3`、
+  `EMBEDDING_BATCH_SIZE=64`（百炼上限 10，智谱为 64）
+
+## 5. 验证（实测）
+
+| 项 | 结果 |
+|---|---|
+| 全量后端测试 | **72 项通过 / 17 skip / 0 失败**（本次新增 10 条全绿） |
+| 未回退到旧变量 | 启动日志**无**「检测到旧变量 DASHSCOPE_*」告警 ⇒ 新变量确实生效 |
+| embedding 已独立配置 | `Embeddings = embedding-3 @ https://open.bigmodel.cn (dim=1024, batch=64)` |
+| chat 真实链路 | `CHAT_FAIL: 401 {'code':'401','message':'令牌已过期或验证不正确'}` |
+| embedding 真实链路 | `EMBED_FAIL: 401 {'code':'401','message':'令牌已过期或验证不正确'}` |
+| **★ 解耦的端到端证据** | 错误码由百炼的 `Arrearage` 变为智谱的 `令牌已过期或验证不正确` ⇒ **两条链路都已独立打到智谱**（不再是百炼） |
+| 容器 | api / worker 重建后均 `healthy` |
+
+## 6. 未完成（阻塞在密钥）
+
+**当前 key 无效**：`0538398b9f334bafbd5246b53009137d` 是纯 32 位、**无点号**。
+智谱 API Key 的标准格式是 **`{id}.{secret}`**（官方 JWT 示例即 `id, secret = apikey.split(".")`），
+少一段必然 401。换成完整 key 后需重跑三项验收：
+① chat 连通 ② embedding 连通 ③ 上传文档 → 入库 → 提问（真 E2E）。
+
+**另一处待核**：模型名。`glm-4-flash` 在免费档里可能已更名为 `glm-4.7-flash`
+（据公开资料，`glm-4.5-flash` 已于 2026-01-30 下线并自动路由）。key 修好后以实测为准。
+
+## 7. 残余风险
+
+| # | 缺口 |
+|---|---|
+| 1 | 模型名与端点的匹配未经真实调用验证（`LLM_MODEL=glm-4-flash` 目前只是假设） |
+| 2 | 向量库里 4 个片段由 `text-embedding-v4` 生成，与 `embedding-3` **向量空间不同** ⇒ key 修好后必须清库重传（源文件 `data/uploads/4271c477f93f.md` 仍在，无需重新上传） |
+| 3 | `llm_model` / `embedding_model` 的默认值仍是百炼的 `qwen-plus` / `text-embedding-v4`：换供应商时忘改模型名，报错发生在**调用时**而非启动时（应由 E.3 #1 的首次运行向导接管） |
+| 4 | `LLM_PROVIDER=local` 这条路仍是断的（`LOCAL_LLM_BASE_URL` 指向 compose 里不存在的 `llama` 服务）—— 对应 E.3 #7，本次未动 |
+
+## 8. 回滚
+
+```bash
+cd ~/phase1-rag
+cp .backup-20261015-decouple/config.py      backend/app/config.py
+cp .backup-20261015-decouple/llm.py         backend/app/llm.py
+cp .backup-20261015-decouple/evaluate_ragas.py backend/evaluation/evaluate_ragas.py
+cp .backup-20261015-decouple/.env.example   .env.example
+cp .backup-20261015-decouple/deploy.sh      deploy.sh
+cp .env.bak-20261015134818-predcople        .env
+docker compose up -d --build api && docker compose up -d api worker
+```
+
+## 9. 日常命令差异
+
+| 目的 | 命令 |
+|---|---|
+| 看当前生效的供应商 | `docker logs rag-api \| grep -E 'LLM =|Embeddings ='` |
+| 直接读容器内的解析结果 | `docker exec rag-api python -c "from app.config import get_settings as g; s=g(); print(s.llm_base_url, '|', s.embedding_base_url)"` |
+| 只测 chat（不走向量库） | `docker exec rag-api python -c "from app.llm import get_chat_model as f; print(f().invoke('ping').content)"` |
+| 只测 embedding | `docker exec rag-api python -c "from app.llm import get_embeddings as f; print(len(f().embed_query('测试')))"` |
+
+---
+
+# 第十一次变更：智谱链路端到端验收 + 修掉两个会「删掉源文件」的缺陷（2026-10-15 下午）
+
+> 时间：2026-10-15 下午
+> 起因：第十次变更做完供应商解耦后，卡在「智谱 key 不完整」（纯 32 位、无 `.` 分隔符）。
+> 本轮拿到完整 key 收尾验收，并在验收过程中**实测踩到两个真实缺陷**，一并修掉。
+
+## 1. 一句话
+
+智谱（GLM）链路已**端到端跑通**：上传 → 队列 → worker 向量化 → 检索问答全部成功。
+同时修掉 `delete_document` 的两个缺陷，其中第一个**真的删掉过一份源文件**，已记录在案。
+
+## 2. 智谱 key 形态与配置
+
+完整 key 形如 `{id}.{secret}` —— **32 位 id + `.` + 16 位 secret，总长 49**。
+第十次变更时拿到的 `0538398b9f334bafbd5246b53009137d`（纯 32 位、无点号）就是因此 401 的。
+官方 JWT 示例写得很直白：`id, secret = apikey.split(".")`。
+
+实测确认（2026-10-15）：
+
+| 项 | 实测结果 |
+| --- | --- |
+| chat 模型名 | `glm-4-flash` **仍然存在**（无需改成 `glm-4.7-flash`） |
+| embedding 模型 | `embedding-3`，`dimensions=1024` 生效 |
+| embedding 批量上限 | **64** 条一次成功（百炼是 10） |
+| base_url | `https://open.bigmodel.cn/api/paas/v4`（注意不是 `/v1`） |
+
+`.env` 实际改动只有一行：`LLM_API_KEY` 换成完整 key。
+`EMBEDDING_API_KEY` / `EMBEDDING_BASE_URL` **刻意不单独设置** —— 它们按
+`config.Settings._resolve_provider_credentials()` 的回退链跟随 chat 配置，
+正好都落在智谱。少一处可漂移的配置。
+
+## 3. 端到端验收结果
+
+**清库重传的原因**：旧库 4 个片段由 `text-embedding-v4` 生成。
+不同模型的向量空间不通用（与维度是否相同无关），换 `embedding-3` 后必须重建。
+
+| 环节 | 证据 |
+| --- | --- |
+| chat 连通 | 容器内 `get_chat_model().invoke(...)` → `CHAT_OK: 正常` |
+| embedding 连通 | `get_embeddings().embed_query(...)` → `EMBED_OK: dim = 1024` |
+| 上传契约 | `POST /api/documents/upload` → **202 + `mode:"queued"` + `task_id`** |
+| worker 执行 | worker 日志 `POST https://open.bigmodel.cn/api/paas/v4/embeddings "HTTP/1.1 200 OK"` |
+| 入库结果 | `status=succeeded`，`chunks=5`，`embedded 5/5 chunks` |
+| 检索问答 | 4 个问题全部答对，且 `sources` 指向正确的 `doc_id` / `filename` |
+
+问答抽样（`assistant_mode` 只接受 `school`/`student`，**不是** `knowledge`，传错会 422）：
+
+| 提问 | 回答 |
+| --- | --- |
+| 校训是什么 | 精勤博学，学以致用 `[来源2]` |
+| SOVO 哪年成立 | 2004 年，附完整荣誉列表 `[来源3]` |
+| 何时升格本科 | 2011 年 5 月，四川省第一所独立设置的民办本科高校 `[来源3]` |
+| 校长与地址 | 张应辉；都江堰市青城山镇东软大道 1 号 `[来源1]` |
+
+## 4. 两个缺陷（都在 `delete_document`）
+
+### 4.1 缺陷一：删除范围与文件范围不一致 ⇒ **真的删掉了源文件**
+
+旧实现：
+
+```python
+ids = matched.get("ids") or []      # 按 (doc_id, owner_user_id) 精确匹配
+if ids:
+    store.delete(ids=ids)
+    invalidate_corpus_cache()
+for path in Path(s.upload_dir).glob(f"{doc_id}.*"):   # ← 在 if 之外，无条件执行
+    path.unlink()
+```
+
+向量按「doc_id + 归属」匹配，文件却按 `doc_id` 无条件 glob。
+只要归属对不上，就产生**破坏性中间态**：向量一个没删、源文件已经没了。
+
+实测（文档 owner 是 `shared`、请求者不是它）：
+
+```
+DELETE /api/documents/4271c477f93f  →  {"detail":"未找到该文档"}  [HTTP=404]
+向量数：4 → 4（没删）
+uploads/4271c477f93f.md：已消失  ★
+```
+
+结果是一份「有向量、没源文件」的文档：既删不掉，也无法重新入库。
+**这正是本项目丢掉那份演示文档的直接原因。**
+
+### 4.2 缺陷二：shared 文档谁都删不掉
+
+归属过滤是精确相等，而 `"shared"` 不是任何真实 `user_id`，
+于是公共知识库的文档在 UI 上**永远返回 404**，用户没有删除入口。
+
+### 4.3 修复方式
+
+`rag.delete_document(doc_id, owner_user_id, *, allow_shared=False)`
+
+1. **先按 `doc_id` 取全部片段（连元数据）**，分成三种「删不到」：
+   - ① `doc_id` 根本不存在 → 顺手清孤儿文件，返回 0
+   - ② 存在但一段都不归你 → **什么都不动**（尤其不碰文件），返回 0
+   - ③ 存在且有可删片段 → 删片段；**片段清空后**才删文件
+2. **只有在删掉的片段数 ≥ 该 doc_id 的全部片段数时，才允许删源文件** ——
+   杜绝「有向量、没源文件」的死文档。
+3. 归属判断**取回来在本地做**，不写进 Chroma 的 `where`：
+   需要的条件形如 `doc_id == X AND (owner == me OR owner == "shared")`，
+   而 Chroma 对「`$or` 嵌在 `$and` 里」的支持随版本变化，实测容易行为不一致。
+   一个 doc 的片段数很少，本地过滤零风险。
+4. `allow_shared` 只在本机单人模式（`AUTH_MODE=local`）由 `main.py` 打开 ——
+   那种场景里 `"shared"` 就是主人自己上传的资料，删不掉才是错的。
+   多用户（session）模式保持原语义。
+
+新增常量 `rag.SHARED_OWNER_ID = "shared"`，原来这个字面量散落在多处。
+
+## 5. 事故记录：演示文档丢失（不可恢复）
+
+| 项 | 内容 |
+| --- | --- |
+| 丢失文件 | `data/uploads/4271c477f93f.md`（6,285 字节，成都东软学院-学校概况） |
+| 原因 | 缺陷一 —— 删除返回 404，但源文件被无条件删除 |
+| 恢复尝试 | 本地副本、服务器 `~`/`/tmp`/`/var/tmp` 全盘查找、Chroma SQLite（`embedding_fulltext_search_data` / `embeddings_queue`）—— **均无**（那些二进制块是 HNSW 索引，不含原文） |
+| 处置 | 依据学校官网公开信息**新建**了一份替代文档（`成都东软学院-学校概况.md`，6,177 字节，5 个片段）。**内容非原文**，仅作演示语料 |
+
+## 6. 测试
+
+新增 `backend/tests/test_document_delete.py`，8 条用例。设计要点：
+**每条都同时在两层断言** —— ① 返回值（接口语义）② 磁盘副作用（真正闯祸的那层）。
+
+关键用例：
+
+- `test_shared_doc_without_permission_keeps_vectors_and_source` —— 事故本身的正向复现
+- `test_partial_ownership_keeps_source` —— 片段没删净时源文件必须保留
+- `test_similar_doc_id_file_is_not_touched` —— 反向用例：`doc-abc.*` 不能命中 `doc-abc2`
+
+**有效性验证（重要）**：同一组用例在旧代码上必须失败，否则测试没有价值。
+实测旧代码：
+
+```
+接口返回删除片段数 = 0
+向量剩余         = 2
+源文件是否还在   = False      ★ BUG 复现
+```
+
+新代码：
+
+```
+接口返回删除片段数 = 0
+向量剩余         = 2
+源文件是否还在   = True       ✔ 删不掉就什么都不动
+```
+
+全量回归：**80 项通过 / 17 skip / 0 失败**（第十次变更为 72 项，新增 8 项）。
+
+真实 API 上再验一次（把 owner 手工改成无权限用户 / `shared`）：
+
+| 场景 | 期望 | 实测 |
+| --- | --- | --- |
+| 无权限删除 | 404 + 文件保留 + 向量不动 | 404，文件在，向量 5 个未动 |
+| shared（本机模式） | 200 + 文件同步清除 | `{"deleted_chunks":5}`，文件消失，向量 0 |
+
+## 7. 改动文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `backend/app/rag.py` | 新增 `SHARED_OWNER_ID`、`_discard_document_files()`；重写 `delete_document()` |
+| `backend/app/main.py` | 删除路由传 `allow_shared=_auth_mode() == "local"` |
+| `backend/tests/test_document_delete.py` | **新增** 8 条回归测试 |
+| `.env`（服务器侧） | 仅 `LLM_API_KEY` 换成完整 key |
+
+## 8. 回滚
+
+```bash
+cd ~/phase1-rag
+cp .backup-20261015-deletefix/rag.py  backend/app/rag.py
+cp .backup-20261015-deletefix/main.py backend/app/main.py
+cp .env.bak-20261015135821-prekey .env
+docker compose build api && docker compose up -d api worker
+```
+
+## 9. 日常命令差异
+
+| 目的 | 命令 |
+| --- | --- |
+| 看知识库现状 | `curl -s http://127.0.0.1:8000/api/documents` |
+| 看向量总数 | `docker exec rag-api python -c "from app.vectorstore import get_vectorstore as g; print(g()._collection.count())"` |
+| 看落盘源文件 | `ls -la ~/phase1-rag/data/uploads/` |
+| 提问（**注意 mode 取值**） | `curl -s -X POST http://127.0.0.1:8000/api/chat -H 'Content-Type: application/json' -d '{"question":"...","assistant_mode":"school"}'` |
+| 删除文档 | `curl -s -X DELETE http://127.0.0.1:8000/api/documents/<doc_id>` |
+| 一致性自检（文档数 vs 源文件数） | 见下方脚本 |
+
+一致性自检（三者应互相对应：文档列表 / 向量片段 / uploads 文件）：
+
+```bash
+cd ~/phase1-rag
+curl -s http://127.0.0.1:8000/api/documents
+docker exec rag-api python -c "from app.vectorstore import get_vectorstore as g; print('vectors =', g()._collection.count())"
+ls -la data/uploads/
+```
+
+---
+
+# 第十二次变更：站点注册表（阶段 C ① —— 「助手能操作哪些站点」从代码搬进数据库）
+
+> 时间：2026-10-15
+> 起因：`Muse化路线图.md` 阶段 C ①。改造前同一个站点的信息硬编码在**两个容器的四处**：
+> `backend/app/main.py`（`_LOGIN_TARGETS` / `_LOGIN_TARGET_ALIASES`）、
+> `backend/browser/mcp_server.py`（`ALLOWED_HOST` / `ALLOWED_LOGIN_URL` /
+> `USERNAME_SELECTOR` / `PASSWORD_SELECTOR` / `_BLOCKED_PATH_PARTS`）。
+> 加一个站点要同时改两个容器的 Python 并重建镜像。
+
+## 1. 一句话
+
+「助手能操作哪些站点」从代码常量搬进 `sites` 表，由用户在界面上登记；
+**新增站点不改任何 Python、不重建镜像、不重启服务**，且下一个句子立刻生效。
+
+## 2. 为什么真相源放 api 侧，而不是让 browser 直连数据库
+
+| | A. browser 直连 PG 读 sites | **B. api 持有真相源，把规格下发给 browser（已选）** |
+|---|---|---|
+| 改动 | browser 加 psycopg 依赖 + DSN | browser 的 `start_login_session` 多几个入参 |
+| 职责 | browser 变成「既读库又开浏览器」 | browser 保持纯执行器 |
+| 白名单强度 | 强（browser 自持白名单） | 弱一级，需补两条（见下） |
+| 与阶段 E v2 的关系 | v2 合并容器后此改动被推翻 | v2 后自然演化为进程内调用 |
+
+选 B。为一道「api 已被攻破」才成立的威胁，付出「一个容器新增数据库依赖 + 角色混淆」的代价不成比例。
+**白名单强度用两条补回来**：
+
+1. `login_url` 的域名必须等于 `host`（自一致性，挡「host 写 A、url 写 B」）；
+2. 保留 `_public_target()`（DNS 解析 + 必须是公网 IPv4）—— 它才是真正挡 SSRF 的那道，与白名单来源无关。
+
+第 1 条在 api 与 browser **各实现一遍**（`site_store.validate_site` 与
+`mcp_server._validate_site_spec`）。两份刻意独立：跨容器共用同一份代码，等于把
+「第二道防线」降级成「同一道防线调用了两次」。
+
+## 3. 改了什么
+
+### 3.1 数据层（新增三个模块，同批落地）
+
+| 文件 | 作用 |
+|---|---|
+| `backend/app/site_store.py` | `sites` 表 + 规格校验 + 别名匹配 + 幂等播种 |
+| `backend/app/approval_store.py` | 审批状态机（W3 用，本次仅落地不接线） |
+| `backend/app/audit_timeline.py` | 只读联合视图（W4 用，本次仅落地不接线） |
+
+### 3.2 api 侧 `backend/app/main.py`
+
+- 删掉 `_LOGIN_TARGETS` / `_LOGIN_TARGET_ALIASES` / `_match_login_target` 的常量表版本。
+- `_match_login_target(question, owner_user_id)` 改为查 `sites` 表 + `match_site()`。
+  **刻意不做进程内缓存**：站点面板刚建完站，用户下一句就会说「登录 XX」，
+  带 TTL 的缓存会让刚建的站点在那几秒里「看起来没生效」——排查成本远大于一次对 50 行小表的 SELECT。
+- 新增 `GET/POST/PUT/DELETE /api/sites`；`SiteRequest` 的 pydantic 长度上限刻意**放宽**到比
+  `site_store` 规则更松，让所有语义错误都从 `validate_site` 出同一种形状的报错（一句中文 `detail`），
+  而不是前端要同时处理「列表状 pydantic 错误」和「字符串 detail」两套。
+- `_execute_login_tool` 改用站点规格；新增 `enabled=false` 分支（**在查凭证之前**拒绝 ——
+  否则一次「不该发生」的登录仍会在凭证审计里留下一条 reveal 记录）。
+- 启动期播种内置站点；`/api/sites` 加入 `Cache-Control: no-store` 白名单。
+
+### 3.3 browser 侧 `backend/browser/mcp_server.py`
+
+- 删掉那五个模块常量。`_safe_url(url, host)` / `_safe_path(path, blocked_path_parts)` 改为**带参** ——
+  每个会话带自己那份规格，白名单判定逻辑仍只有一处。
+- 新增 `_validate_site_spec(...)`（第 2 节说的第二道防线）。
+- `start_login_session(owner_user_id, login_url, host, username, password, username_selector, password_selector, blocked_path_parts)`；
+  校验顺序是「先验规格 → 再 SSRF 检查 → 最后才开浏览器」，不能颠倒。
+- 会话里保存 `site`，供 `_page_summary` / `open_login_session_link` / `go_back_login_session` 使用
+  （`urljoin` 的基准从全局常量改为本会话站点的 `login_url`）。
+
+### 3.4 前端
+
+| 文件 | 变化 |
+|---|---|
+| `lib/api.js` | 新增 `listSites` / `createSite` / `updateSite` / `deleteSite` |
+| `composables/useSites.js` | 新增。**不重复实现后端校验规则**，只做「多行文本 → 数组」的输入形式转换 |
+| `components/SitePanel.vue` | 新增。侧栏列表 + `Teleport` 浮层编辑器 |
+| `components/AppSidebar.vue` | 个人助手侧挂 `SitePanel`（站点只在个人助手模式下参与判断） |
+| `App.vue` | 启动时取一次站点列表（不 await，它不影响「显示历史还是欢迎语」） |
+| `components/ChatComposer.vue` | 输入提示语从**已登记站点**里取别名，不再写死学校名 |
+| `components/BrowserHandoff.vue` | 面板标题从「东软智慧教育平台」改为中性的「校园网站」 |
+
+★ 浮层必须 `Teleport` 到 `body`：窄屏时侧栏带 `transform`（抽屉滑入），
+而 `position: fixed` 的元素若位于 transform 祖先内部会以那个祖先为包含块 —— 表现是浮层被裁进侧栏。
+
+### 3.5 接口契约
+
+| 接口 | 成功 | 失败 |
+|---|---|---|
+| `GET /api/sites` | 200 `{sites:[…]}` | — |
+| `POST /api/sites` | 201 | 409 已存在 / 422 校验失败 |
+| `PUT /api/sites/{site_key}` | 200 | 404 / 422（含「site_key 不可修改」） |
+| `DELETE /api/sites/{site_key}` | 200 | 404 |
+
+删站点**刻意不级联删凭证**：孤儿凭证的表现是「尚未登记该站点的登录凭证」，
+这是一个可读的失败，比悄悄删掉用户的账号记录安全得多。
+
+## 4. ★ 不兼容变更：api 与 browser 必须**同时**重建
+
+`start_login_session` 的 MCP 工具签名变了。只重建其中一个的话，api 会传新参数、
+browser 还是旧签名 → FastMCP 参数校验失败 → 表现为「自动登录工具暂不可用」。
+
+```bash
+docker compose build api browser frontend
+docker compose up -d api worker browser frontend   # api/worker 共用镜像，必须一起重启
+```
+
+## 5. 行为变化：内置站点只在 `local` 模式播种
+
+启动时若是 `AUTH_MODE=local`，会把改造前的硬编码站点（`nsu-smart-education`）幂等播种给本机主人，
+保证升级后「登录智慧教育平台」这句话照旧生效、**不覆盖**用户改过的配置。
+
+**`session` 模式（多用户）从空注册表起步**，不播种。理由：内置站点是「本项目单用户形态」的行为快照，
+不该强加给别人的部署；那边由用户在站点面板自行新增 —— 这正是本次改造要买到的东西。
+⚠️ 若将来真有 `session` 模式的既有部署，升级后需**手动登记一次站点**
+（此时已经不是「改代码」了，改的是界面配置）。
+
+## 6. 已知缺口（写在明面上）
+
+1. ⚠️ **前端没有凭证面板** —— `frontend/src/` 里没有任何地方调 `/api/credentials`。
+   今日起用户能在界面上登记站点，**却仍不能用界面登记该站点的账号密码**，只能 curl。
+   这与「全程前端页面操作」的目标直接冲突，是紧接着要补的一块（后端接口早就齐了）。
+2. `session` 模式升级后站点表为空（见第 5 节）。
+3. `BrowserHandoff` 的面板标题改为中性文案「校园网站」，不再显示当前站点的真实名称 ——
+   真实名称由聊天消息给出（它由站点规格生成）。要显示在面板标题上需要把站点名透传到
+   `/api/browser-session`，本次未做。
+4. W2 不验证真实校园平台上的**点击**（那是 W3 审批闸门的范围）；本次验证止于「打开页面 + 自动填表」
+   （`verification_pending`），不产生任何提交。
+
+## 7. 验证证据（2026-10-15）
+
+**接口/流程验证脚本 16/16 PASS**（全部走真实 HTTP，不 import 任何 Python 函数 ——
+否则恰好绕过了「能不能从界面配」这个命题）：
+
+| # | 断言 | 结果 |
+|---|---|---|
+| 1 | 启动期播种出内置站点 `nsu-smart-education` | PASS |
+| 2 | `POST /api/sites` 建一个全新站点 → 201，返回体字段正确 | PASS |
+| 3 | 重复 site_key → 409 | PASS |
+| 4 | `login_url` 换域名 → 422 | PASS |
+| 5 | `host` 填 IP（169.254.169.254）→ 422 | PASS |
+| 6 | `PUT` 改 `site_key` → 422 | PASS |
+| 7 | `DELETE` 不存在的站点 → 404，重复删除 → 404 | PASS |
+| 8 | 新站点尚无凭证时，回答里带的是**新站点自己的名字**且指出缺凭证 | PASS |
+| 9 | ★ 登记探针凭证后 `POST /api/chat`「帮我登录验证用平台」→ `browser_session_active=true` | PASS |
+| 10 | 停用站点 → 回答「已停用」，`browser_session_active=false` | PASS |
+| 11 | 删站后同一句话不再进登录分支 | PASS |
+
+第 9 条是本次的关键证据：`browser_session_active=true` 只可能在 browser **用注册表下发的选择器**
+找到并填好两个输入框**之后**出现（选择器错 → 等元素超时 → `login_unconfirmed`）。
+即：站点规格真的从数据库流到了隔离浏览器，全程没有一行代码变化。
+
+**自动化测试**：`Ran 172 tests / OK (skipped=17)`（W1 三个模块 71 条 + W2 新增 32 条在内）。
+新文件 `backend/tests/test_sites_api.py` 含 browser 侧纯函数校验、接口契约、owner 隔离，
+以及「新建站点立刻可被登录意图命中」这条验收口径。
+
+**真实渲染验证**（Chrome headless + SSH 隧道打开真实页面，非 jsdom）：
+站点面板在个人助手侧正确渲染出 `东软智慧教育平台 / study.nsu.edu.cn`（计数 1，数据来自数据库），
+输入框提示语为「帮我登录东软智慧教育平台」—— 该别名取自注册表，证明前端也不再持有硬编码站点名。
+
+**验证后清理**：探针站点、探针凭证（编造值）、浏览器会话、临时引导页均已删除。
+残留检查：`sites = ["nsu-smart-education"]`、`credentials = ["nsu-smart-education"]`。
+
+## 8. 回滚
+
+### 8.1 ★ 先说一件没做好的事：W2 没有「改动前」的备份
+
+阶段 C 的方案（PLAN-GATE A6）写了「代码备份 `.backup-20261015-stagec/`」，
+但实际执行顺序是「改本地副本 → 直接 `scp` 覆盖服务器」，**备份目录一直是空的**。
+等收工时想起来，改动前的文件已被覆盖，旧镜像也已 buildkit 回收
+（`docker images -f dangling=true` 为空）；`git log` 的基线还停在 Vue3 迁移那次提交，
+其后的 56 个文件从未提交，**git 也拿不到**。
+
+⇒ 记为本轮流程失误。教训：**`scp` 之前先 `cp`。备份是动手前的第一步，不是收工前的一步。**
+⇒ 已补的是 `.backup-20261015-stagec/w2-snapshot/` —— **W2 完成之后**的状态，
+   用途是 W3 出问题时回到 W2 这个已验证过的状态，**不能**用来回滚 W2 本身。
+
+### 8.2 回滚 W2 = 反向操作清单 + 丢表
+
+W2 的改动是可枚举的，反向做一遍即可：
+
+1. `backend/browser/mcp_server.py`：删掉 `_validate_site_spec`，把带参的
+   `_safe_url` / `_safe_path` 换回模块常量版本（`ALLOWED_HOST` / `ALLOWED_LOGIN_URL` /
+   `USERNAME_SELECTOR` / `PASSWORD_SELECTOR` / `_BLOCKED_PATH_PARTS`），
+   `start_login_session` 收回归四参数签名 `(owner_user_id, site_url, username, password)`。
+2. `backend/app/main.py`：恢复 `_LOGIN_TARGETS` / `_LOGIN_TARGET_ALIASES`，
+   `_requested_login_target(question)` 去掉 user 参数，删掉 `/api/sites` 四个路由与启动播种。
+3. 前端：删 `SitePanel.vue` / `useSites.js`，回退 `AppSidebar.vue`、`App.vue`、`lib/api.js`、
+   `ChatComposer.vue`、`BrowserHandoff.vue`。
+4. 重建：`docker compose build api browser frontend && docker compose up -d api worker browser frontend`
+5. 丢表：`docker exec rag-postgres psql -U rag -d ragdb -c "DROP TABLE IF EXISTS sites"`
+
+⚠️ 第 1、2 步必须**同时**做（api 与 browser 的 MCP 签名是一对，见第 4 节），
+只回滚一个会得到「自动登录工具暂不可用」。
+
+### 8.3 只回滚数据（不动代码）
+
+```bash
+docker exec rag-postgres psql -U rag -d ragdb -c "DROP TABLE IF EXISTS sites"
+```
+
+表结构全是 `CREATE TABLE IF NOT EXISTS`，下次启动会自动重建并重新播种内置站点。
+用户自己登记的站点会丢，但那些配置能在界面上重建（不像凭证那样需要重新输入口令）。
+没有外键指向 `sites`（`encrypted_credentials.service_key` 是弱关联而非外键），
+所以丢表不牵连凭证与文档。
+
+## 9. 日常命令
+
+| 目的 | 命令 |
+| --- | --- |
+| 看已登记站点 | `curl -s http://127.0.0.1:8000/api/sites \| jq` |
+| 界面上登记站点的新账号 | `curl -s -X POST http://127.0.0.1:8000/api/sites -H 'Content-Type: application/json' -d '{...}'`（字段见第 3.5 节） |
+| 直接查表 | `docker exec rag-postgres psql -U rag -d ragdb -c "select site_key,name,host,enabled from sites order by created_at"` |
+| 跑站点相关单测 | 见第七次变更 §9 的容器内命令，额外挂 `-v "$PWD/backend/browser:/app/browser:ro"` |
+
+⚠️ 跑 `test_sites_api.py` 需要额外挂载 `backend/browser`（`BrowserSiteSpecTests` 要 import `mcp_server`）；
+没挂会整组跳过，不会让整个模块报错。
+
+---
+
+# 第十三次变更：审批闸门（阶段 C ② —— 「未批准时零外部副作用」）
+
+> 时间：2026-10-15
+> 起因：`Muse化路线图.md` 阶段 C ②。改造前，「确认点击」的载体是一段**对话文本**：
+> 助手回一句「确认点击：button「Submit order」」，用户把这行字原样打回聊天框，
+> `browser_agent` 就调 `confirm_pending_login_session_click` 把控件真的点了。
+> 于是审批的唯一门槛是「知道那行字怎么写」—— 而那行字就印在上一句回复里，照抄即可。
+> 更麻烦的是那次「确认」完全活在内存里（browser 容器的
+> `_sessions[owner]["pending_click"]`）：容器一重启就无从追问「助手到底批准过什么」，
+> 也没有任何地方记录「哪一次是超时自动放弃的」。
+
+## 1. 一句话
+
+页面点击从「对话文本确认」改成「PostgreSQL 里一次性、可过期、可对账的审批记录」：
+先 `POST /api/approvals/{id}/approve`、再 `POST /api/approvals/{id}/execute`，
+两个接口各只能成功一次；执行入口全项目唯一；**只有浏览器明确回报 `clicked` 才会写 `executed`**。
+
+## 2. 状态机与两条不变量
+
+```
+pending ──approve──▶ approved ──begin_execution──▶ executing
+   │                    │                              │
+   │                    │                    ┌─────────┴─────────┐
+   │                    │                  clicked            其它回报
+   │                    │                    │                   │
+   │                    │                 executed      expired / failed
+   │                    │
+   ├──reject──▶ rejected│
+   └──超时────▶ expired ◀┘（approved 也可能在过期后才被点 execute）
+```
+
+终态（`rejected` / `expired` / `executed` / `failed` / `unknown`）一经写入不再变更。
+
+两条必须守住的不变量：
+
+1. **`expired` 只能由 `expire_stale()` 写。** `approve()` / `reject()` 一律
+   `require_unexpired=True` ⇒ 过期后批准必然 409，不可能「先过期又批准成功」。
+2. **`executed` 只能由浏览器回报的 `clicked` 触发。** api 自己「以为点了」不算 ——
+   把「我们以为点了」写成「点了」是这张表里最危险的错。
+
+`approve` 与 `begin_execution` 全部写成 `UPDATE ... WHERE status='期望值' RETURNING *`，
+拿不到行即视为冲突（回 409）。先 SELECT 再 UPDATE 会留下竞态窗口，双击按钮就会消费两次。
+
+## 3. 四个刻意的取舍
+
+| 情形 | 处理 | 为什么不能反过来 |
+|---|---|---|
+| 传输层异常（连不上 browser / 超时） | 记 `failed` **终态**，不退回 `approved` | 无法区分「没送达」与「送达了但没等到回复」，后者可能已经点过。允许重试就是允许点两次 |
+| 熔断已打开（`browser_breaker` 拒绝） | 回 **502**，但**保留 `approved`** | 这是唯一能确定「请求根本没发出去」的情形，所以允许重试 |
+| 浏览器回 `no_pending_click` / `pending_click_expired` | 回 **200**，审批落 `expired`（放行+标记） | 请求被正确处理了，只是没有可点的东西。报错会让用户以为系统坏了 |
+| 停在 `executing` 超过 `STUCK_EXECUTION_SECONDS=300` | 标记 `unknown`，**不自动重放** | 与阶段 B 同源：宁可要一次人工介入，也不要静默做两次 |
+
+前两条方向相反、理由一致：**能不能确定「什么都没发生」决定了能不能重试。**
+
+## 4. 改了什么
+
+### 4.1 browser 侧 `backend/browser/mcp_server.py`
+
+- `start_login_session` 多收一个 `site_key: str = ""`（**纯信息性**，只被记住并在控件清单里回传；
+  截断到 64 字符而不是校验，因为它不参与任何安全判定）。
+- `click_login_session_element` 的返回值里 `confirmation_text` 保留，但**新增**
+  `fingerprint` 与 `site_key` —— 前者让「批准时看到的东西」与「执行时点的东西」可对账，
+  后者让审计时间线说得出「在哪个站点上」。
+- `confirm_pending_login_session_click` 补上文档：它是**全项目唯一**会真的点击网页的工具，
+  也是闸门的落点。它自己还有第二道关（`pending_click` 90 秒 TTL + 目标文本精确匹配），
+  与 api 侧那道**刻意独立** —— 纵深防御的意义在于两处不会同时错。
+- `PENDING_CLICK_TTL_SECONDS = 90` 必须与 `approval_store.APPROVAL_TTL_SECONDS = 90` 一致：
+  两处不一致会出现「界面显示还能点，实际浏览器已判超时」这种自相矛盾的表现。
+
+### 4.2 api 侧 `backend/app/main.py`
+
+- 新增 4 个路由：`GET /api/approvals`（先惰性 `expire_stale()` 再列）、
+  `POST /api/approvals/{id}/approve`、`/reject`、`/execute`。
+- `/api/approvals` 进 `no-store` 白名单（90 秒 TTL，缓存下来就是给出过期按钮）。
+- `_answer_browser_task` 新增：把浏览器回报的 `pending_click` **登记成一条审批记录**，
+  并把记录塞进返回值（`task["approval"]`）。
+  ★ 闸门不可用时**刻意不退化成「直接点」** —— 只记 error 日志并告诉用户「本次没有登记可批准的操作」。
+  「审批组件挂了」不等于「可以在没有批准的情况下点击」。
+- `chat()` 返回 `click_approval`；`chat_stream()` 推 `{"type": "click_approval", ...}`（SSE 协议已更新）。
+- 启动时若审批闸门初始化失败，打 **error** 日志说明「不会下发一键批准按钮（不会退化成直接点击）」。
+- HTTP 状态映射：404 记录不存在 / 409 未批准或已被处理 / 410 已过期（仅 execute）/ 502 浏览器不可用。
+
+### 4.3 `backend/app/browser_agent.py`
+
+- **删掉**「手打确认文本即执行」的分支（见第 6 节）。
+- `confirmation_text` 返回键 → `pending_click` 字典（含 `target` / `fingerprint` / `site_key`）。
+- `_TOOLS` 里 `click_page_element` 的说明与 `_SYSTEM_PROMPT` 的相关条目改写：
+  不再让模型转达一段确认文本，而是说明批准只能发生在界面卡片上。
+
+### 4.4 前端
+
+| 文件 | 改动 |
+|---|---|
+| `components/ClickApprovalCard.vue` | **新增**。「批准并执行」= approve + execute 两次请求（刻意分开，审计才能区分「用户确认了什么」与「系统执行了什么」）；1 秒倒计时；终态就地显示结果 |
+| `composables/useChat.js` | 消息形状 `pendingClick` → `pendingApproval`；SSE 事件 `click_confirmation` → `click_approval`；新增 `settleApproval()`；开新会话时**只清未落终态的卡片** |
+| `lib/api.js` | 四个审批方法 |
+| `components/MessageBubble.vue` / `MessageList.vue` | 挂载卡片、转发 `settle-approval` |
+| `styles/main.css` | `.msg-approval` 按状态着色左边框（pending 警示 / executed 成功 / rejected·expired 灰 / failed 红） |
+
+倒计时**只是提示而不是判据**：`expires_at` 来自服务器，浏览器时钟可能不准（实测本机与 VM
+有约 1 秒偏差，界面会显示「91 秒」）。真正说了算的是服务端，过期后点按钮会收到 409/410，
+卡片把那句话如实显示出来。
+
+### 4.5 测试
+
+新增 `backend/tests/test_approvals_api.py`（约 400 行）。核心断言是**调用次数为零**，
+而不是状态码 —— 接口回 409 只说明它认为自己拒绝了，说明不了没人点过。
+另含放行+标记、终态不可重放、他人不可见、每步只留一条审计事件等。
+
+## 5. ★ 不兼容变更：api 与 browser 必须**同时**重建
+
+`start_login_session` 的 MCP 签名从 8 参变成 9 参（新增 `site_key`）。
+只重建一个不会崩，而是静默表现为「自动登录工具暂不可用」——
+很容易被误判成「浏览器没起来」。
+
+```bash
+docker compose up -d --build api browser worker   # worker 与 api 共用镜像，一起重启
+```
+
+## 6. ★ 故意封死的一条路径（用旧用法的人会以为功能坏了）
+
+`browser_agent.py` 里，凡是匹配 `^\s*确认点击：.+?\s*$` 的输入**不再触发任何点击**，
+改为回一句「页面点击已改为『先批准、再执行』：请在上一条消息的卡片上点『批准并执行』」。
+
+这是有意的行为回退：旧用法（照抄助手给的那行字）不再生效，而这正是闸门能成立的前提 ——
+**审批的载体一旦是用户可自由伪造的自然语言，闸门就等于不存在**。
+`test_typed_confirmation_no_longer_clicks_anything` 断言 `calls == []` 且 `get_model.assert_not_called()`。
+
+## 7. 验收证据
+
+| 项目 | 结果 |
+|---|---|
+| `.verify-w3.sh`（**在宿主机上**跑，需要 `docker` 与 `curl`） | **PASS=22 FAIL=0** |
+| `.verify-w3-e2e.py`（真实 chat 路径产出审批） | **FAIL=0 全部通过** |
+| 后端单测 | `Ran 192 tests / OK (skipped=17)` |
+| 真实渲染（真 Chrome + CDP + SSH 隧道） | `.shots/W3-0/1/2/4-*.png` 四张 |
+
+断言尽量落在**副作用层**，而不是接口返回值：
+
+| 断言 | 取证位置 |
+|---|---|
+| 未批准直接 execute → 409，且审批仍是 `pending` | `operation_approvals` |
+| 浏览器工具**零调用**（对照：已批准路径调用 1 次） | `docker logs rag-browser` 里 `CallToolRequest` 的条数 |
+| 全程没有 `approval_executed` 事件 | `operation_audit` |
+| 该审批的 `executed_at` 仍为空 | `operation_approvals` |
+
+一次真实界面批准+执行留下的审计（逐条）：
+
+```
+approval_requested  {target: "button「Submit order」", site_key: "w3r1792049840", approval_id: "8f9f9b03…"}
+approval_granted    {status: "approved",   approval_id: "8f9f9b03…"}
+approval_executed   {status: "executed",   page_title: "", approval_id: "8f9f9b03…"}
+```
+
+**点击真的发生了的独立证据**：卡片显示「已按你的批准点击该控件。**已跳转到：/post**」——
+httpbin 的表单真的被提交了，页面从 `/forms/post` 走到了 `/post`。
+这不是接口自述，是目标站点真的变了状态。
+
+惰性过期也验证过：一条 `pending` 记录在 `GET /api/approvals` 之后被写成 `expired`，
+并补上一条 `approval_expired` 审计。**在有人读列表之前，数据库里那条记录一直是 `pending`**——
+这是惰性过期的固有代价，界面靠自己的倒计时先一步放弃。
+
+## 8. 本轮踩到的坑
+
+1. **`site_key` 漏传**（被 `.verify-w3-e2e.py` 抓出来）。给 browser 的
+   `start_login_session` 加了参数，却忘了在 `main._execute_login_tool` 里传。
+   后果**不是功能坏掉**，而是审计里所有点击都归到空站点 —— 这种「功能正常但取证失真」
+   的缺陷只有端到端脚本能发现，接口返回值和单测都看不出来。
+2. **空串 vs NULL**。修 `site_key` 之前创建的审批存的是 `''`，不是 NULL。
+   清理脚本写成 `site_key IS NULL` 会**静默漏行**：脚本报成功，残留检查却还是 1。
+   ⇒ 一律用 `coalesce(site_key,'') = ''`。`.verify-w3-cleanup.sql` 里已标注。
+3. **测试写死了与环境相关的终态**。C 段原本断言终态是 `failed`（依赖「此刻没有活的浏览器会话」
+   ⇒ browser 回 `session_expired`）。跑完渲染取证后有了活会话，browser 改回
+   `no_pending_click` ⇒ 终态变 `expired`，脚本无故变红 3 项。
+   ⇒ 改为接受 `failed|expired`（两者都等于「什么都没点」），并把真正的不变量单独断言：
+   不是 `executed`、`executed_at` 为空、重放被拒。
+   **一个会无故变红的测试最终会被忽略**，所以宁可少断言也不写死环境。
+4. **e2e 依赖外部站点会抖动**。httpbin.org 偶发首次失败（`login_unconfirmed`），重试即过。
+   但清理在 `finally` 里，所以失败那次残留也是 0。
+   （对照：第十二次变更期间那份 e2e 的清理在顺路上，一次失败就留下了一条孤儿审批 ——
+   就是本轮清理时那条 `site_key` 为空的 `8f4839da`。）
+
+## 9. 已知遗留（诚实标注）
+
+- ⚠️ **刷新页面后审批卡片会消失**。`approval` 只活在消息对象上，而 `/api/chat/{id}/history`
+  返回的历史里没有它（且已消费的操作走的是另外的接口，不在会话记忆里）。
+  待办的「待批准操作」侧栏面板（用 `api.listApprovals`）能关掉这个口子 —— **本轮未做**，
+  它不在 W3 的方案范围内。
+- 前端仍无**凭证面板** —— 但这条已**由用户裁定「不做」**（2026-10-15，范围决策而非缺陷）：
+  页面里能登记站点，不能登记该站点的账号密码；凭证登记继续走 API（`POST/PUT /api/credentials`
+  + `/{id}/reveal`）。**不再作为阻塞点或待办跟踪。**
+- `page_title` 常为空（点击伴随跳转，读 title 时新页面还没就绪）。前端已改为退到路径显示
+  （「已跳转到：/post」），不影响闸门判定。
+- 不覆盖真实校园平台上的端到端点击：那需要真实账号且会产生不可逆副作用，刻意不做。
+
+## 10. 回滚
+
+改动前的文件都在 `.backup-20261015-stagec/w3-pre/`（含目录结构）：
+
+```
+backend/app/browser_agent.py  backend/app/main.py  backend/browser/mcp_server.py
+backend/tests/test_browser_agent.py  backend/tests/test_browser_login.py
+frontend/src/components/MessageBubble.vue  frontend/src/components/MessageList.vue
+frontend/src/composables/useChat.js  frontend/src/lib/api.js  frontend/src/styles/main.css
+```
+
+```bash
+cd ~/phase1-rag && cp -r .backup-20261015-stagec/w3-pre/backend/. backend/
+cp -r .backup-20261015-stagec/w3-pre/frontend/. frontend/
+docker compose up -d --build api browser worker frontend
+```
+
+⚠️ api 与 browser 必须一起重建（见第 5 节）。只回滚一个会得到「自动登录工具暂不可用」。
+
+**数据不用回滚。** `operation_approvals` / `operation_audit` 两张表留着无害：
+旧代码根本不读它们，只是从「审批的真相源」退回成「一堆没人看的记录」。
+**不要为了回滚去 DROP 它们** —— 那些审批记录本身就是审计价值，
+而且 `DROP` 会连带丢掉「哪些操作被批准过」的历史。
+
+回滚后必须重新验证：`click_approval` 会重新变成 `click_confirmation`，
+`ClickApprovalCard.vue` 不再被引用（旧版 `MessageBubble.vue` 里是 `.msg-confirm` 按钮块）。
+
+# 第十四次变更：审计时间线（阶段 C ④ —— 「助手到底碰过什么」有了可核对的页面）
+
+日期：2026-10-15 晚。**阶段 C 至此全部完成**（①站点注册表 ②审批闸门 ③审计时间线，
+编号对应路线图交付栏 ①②③④ 中的后三项）。
+
+## 1. 这次解决什么问题
+
+前两次变更给了「助手能碰哪些站点」（W2）和「碰之前要你点头」（W3），但没有
+「它到底碰过什么」。`credential_audit` 表从第十次变更前就在记，`operation_audit`
+从第十三次变更起在记，可它们只存在于 PG 里 —— 信任面最后一块拼图是把这两份
+记录变成**用户能核对的东西**，否则前两块只能靠信任，不能靠验证。
+
+## 2. 读模型（`audit_timeline.py` 改造）
+
+W1 就位的模块原本只有 `for_owner(limit)`，本次补齐接线所需的三块：
+
+### 2.1 游标翻页（不是 OFFSET）
+
+原实现只有 `LIMIT`，没有翻页。翻页必须做在 SQL 里（UNION 之后 ORDER BY +
+WHERE 游标），不能在应用层「各查各的再合并」—— 后者「第 2 页」可能比
+「第 1 页」还新。游标 = `created_at|source|seq` 三段：
+
+- **为什么带 `source` 和 `seq`**：`created_at` 撞在同一微秒时（批量登记 +
+  取明文就发生在同一事务毫秒里），只按时间翻页会在边界处**跳行或重复**。
+  `source`（credential/operation/site）+ 自增 `seq`（各表 audit_id/serial）
+  组成全序 tiebreaker，严格 `<(cursor)` 排除游标自身。
+- **游标格式刻意用 `Z` 结尾而不是 `isoformat()` 的 `+00:00`** —— 这是本次
+  踩到的**真 bug**：`+` 在 query string 里会被解码成空格，服务端自己吐出的
+  游标原样回传反而被判 422「格式不正确」。时间戳永远 UTC 且以 `Z` 结尾，
+  解析时两种格式都接受（旧数据兼容）。
+
+### 2.2 站点变更也进时间线（W2 → W4 的接缝）
+
+`site_store.py` 的 create/update/delete 现在在**同一事务**里写
+`operation_audit`（`site_registered` / `site_updated` / `site_removed`）。
+理由：站点注册表是「你授权了助手能碰什么」，正是信任面最该留痕的事；
+而它能放进同一事务是因为 `_record_site_event()` 复用调用方传入的 connection，
+成功/失败一起回滚 —— 测试 `test_audit_and_site_write_succeed_or_fail_together`
+钉住这条。内置站点播种（`ensure_builtin_sites`）**刻意不记审计**：那不是
+用户做的动作，记进去只会把「你做过什么」和「升级脚本做过什么」混在一起。
+
+### 2.3 摘要仍在后端生成
+
+join 凭证 label、站点名这些前端拿不到的数据；action → 中文的映射一处维护。
+不认识的动作**原样透传**（`archive` 就输出 `archive`），绝不猜 —— 时间线是
+核对用的界面，一句编出来的中文比空白更有害。
+
+## 3. API（`main.py`）
+
+`GET /api/audit/timeline?limit=&cursor=`：
+
+- `limit: ge=1, le=_AUDIT_PAGE_MAX`（=100，比模块 `MAX_LIMIT=200` 小 1 ——
+  内部多取一条判断 `has_more`，正好取满会截断多取的那条）。
+- 返回 `{events, has_more, next_cursor}`；`next_cursor` 只在 `has_more` 时给出。
+- 非法游标 → **422**（带原因），不是 500 —— 旧链接/手滑不该变成服务器错误。
+- 加入 no-store 列表：审计是事实记录，被缓存就会「删了还在」。
+- 启动/关闭接线 `get_audit_timeline_or_none()` / `close_audit_timeline()`，
+  初始化失败只报 error 不拖垮启动（与 site/approval store 同一策略）。
+
+## 4. 前端
+
+- `composables/useAuditTimeline.js`：状态 + 游标累积加载。
+- `components/AuditTimelinePanel.vue`：**侧栏最近几条 + 「查看全部」浮层**
+  （Teleport 到 body —— SitePanel 踩过的 transform 裁剪坑，注释里留了案底）。
+  侧栏预览回答「刚刚那次批准真的执行了吗」，浮层负责翻旧账。
+- **刷新由用户触发，不自动轮询**：审计是事实记录不是进度条，每 5 秒变的
+  数字只会让人怀疑自己看的是哪一版。
+- 时间戳**保留秒**：同一分钟内「批准 → 执行」是常态，只到分钟分不出先后。
+- level 颜色由后端定（ok/warn/info/muted），前端只映射不猜语义。
+- 浮层里的行**允许换行**：核对时被省略号截断的句子毫无用处。
+
+## 5. 测试
+
+- `test_audit_timeline.py`：纯函数（摘要不猜、level 兜底、游标编解码）+
+  需 PG 的（跨表全局倒序、翻页不重不漏、**取页之间插入新事件不出错**——
+  游标语义的核心证明、站点审计与站点写入同生共死、失败的事不留痕）。
+- `test_audit_api.py`：走 HTTP 的 owner 隔离（★ 先证明别人的事件**真的写进
+  库了**，再断言接口读不到 —— 否则一次静默失败的 INSERT 会让测试假通过）、
+  非法游标 422、三页游标不重不漏、`has_more` 最后一页为 False。
+- 全量回归：**212 tests OK (skipped=17)**（新增 20 条）。
+
+## 6. 验收（宿主机 `.verify-w4.sh`，PASS=20 FAIL=0）
+
+判据全部落在数据层而非返回值：翻页取到的总条数**等于库里该 owner 的总数**
+（48 = 48，少一条就红）；跨页 id 去重后等于总数；越权用例先 INSERT 别人的
+事件、确认写库成功、再断言接口里读不到；站点用例同时看时间线事件与站点列表。
+
+**渲染取证**（CDP 驱动真 Chrome，`.verify-w4-render.mjs`）：侧栏面板真实
+渲染 30 条预览与计数；浮层「加载更多」点击后 30 → 48 条（与库里总数吻合），
+按钮消失、「没有更多了」出现。level 色条（warn 橙 / info 蓝 / muted 灰）肉眼可辨。
+
+## 7. 踩到的坑
+
+1. **验收脚本自己的 `limit=200` 越界**：路由上限是 100（`_AUDIT_PAGE_MAX`），
+   脚本里五处 `limit=200` 全部 422，jq 报 `Cannot iterate over null`，
+   5 项 FAIL 其实是同一个原因。修脚本而不是放宽接口 —— 上限是刻意设计的。
+2. **游标里的 `+00:00`**：见 §2.1。教训是「服务端生成的、要经 query string
+   回传的值，必须自己先过一遍 URL 编码」。
+3. **清理条件与写入格式不一致**：探针站点名为 `W4探针站点$TS`，清理脚本写
+   `%探针站点$TS%` 看似能匹配，实际 `LIKE` 是能匹配的 —— 真正漏掉的是
+   审计事件 `detail` 里的 `target` 带了 `W4` 前缀之外，清理语句只删了
+   `owner_user_id='$OTHER_ID'` 的行，而探针站点事件属于**本 owner**。
+   清理要以 `site_key`/`w4probe` 这种精确令牌为准。
+
+## 8. 回滚
+
+```bash
+cd ~/phase1-rag/.backup-20261015-stagec/w4-pre
+cp backend/app/audit_timeline.py ~/phase1-rag/backend/app/
+cp backend/app/site_store.py    ~/phase1-rag/backend/app/
+cp backend/app/main.py          ~/phase1-rag/backend/app/
+cp backend/tests/test_audit_timeline.py ~/phase1-rag/backend/tests/
+cp frontend/src/lib/api.js      ~/phase1-rag/frontend/src/lib/
+cp frontend/src/composables/useChat.js ~/phase1-rag/frontend/src/composables/
+cp frontend/src/App.vue         ~/phase1-rag/frontend/src/
+cp frontend/src/components/AppSidebar.vue ~/phase1-rag/frontend/src/components/
+cd ~/phase1-rag
+rm -f backend/tests/test_audit_api.py frontend/src/composables/useAuditTimeline.js \
+      frontend/src/components/AuditTimelinePanel.vue
+docker compose up -d --build api frontend && docker compose up -d api worker
+```
+
+回滚后时间线面板消失（AppSidebar 不再引用），站点变更不再写审计。
+**已写入的审计行不用删** —— 旧代码不读它们，留着就是历史。
+
+# 第十五次变更：终端执行 run_shell（受限沙箱 + 审批闸门 + 审计，2026-10-15 晚）
+
+> 详细设计见 `docs/终端执行-方案.md`（12 条决策已固化）。这里只留要点与坑。
+
+- 独立 shell 容器（非特权 + no-new-privileges + 无 docker.sock + 独立 shell_internal 网络），
+  命令只在该容器内执行，不碰宿主机。
+- 三档分类器 `app/shell_exec.py`（双镜像共用源码）：readonly（直接执行）/
+  dangerous（走 W3 审批）/ forbidden（永久拒绝：rm/docker/ssh/拼接符/重定向/路径越界）。
+- shell 容器双 MCP 工具：run_shell（只读第二道防线）vs run_approved_shell（已批准写命令）。
+  注意：不能用一个工具 + approved 参数 —— 会把「是否批准」变成可伪造入参。
+- 意图路由靠 LLM function-calling（shell_agent.intends_shell），非关键词。
+- 路径校验必须用 posixpath.normpath（注意不是 os.path.normpath，Windows 本地会把
+  /work/x 转成反斜杠路径误判越界）。
+- 端口：shell MCP 8767、health uvicorn 8768（都 bind 8767 会让 /mcp 404）。
+- 前端 ClickApprovalCard 按 action 分流；SSE 事件名 shell_approval（不等于 click_approval）
+  前端必须各有一个 case，漏了就静默丢卡片。
+- 提交 f068fec（后端）+ 44934dc（前端收尾）。
+
+# 第十六次变更：阶段 D 长期记忆（一）—— user_facts 跨会话抽取 + pgvector 检索 + 遗忘（2026-10-15 深夜）
+
+## 1. 做了什么
+
+路线图 §阶段 D 拆两块，本次只做 ①跨会话记忆，②主动建议留待下一轮。
+
+- 新增 backend/app/fact_store.py：
+  - user_facts 表：fact / fact_type（CHECK 约束 preference|habit|topic）/
+    confidence / source_session_id+source_message_id（出处）/ embedding vector(1024) /
+    forgotten（软删除）。
+  - LLM 抽取：每轮对话后调一次轻量 LLM，抽成结构化 facts。
+  - 语义检索：pgvector 的 <=> 余弦距离，search() 返回 top-k 相关未遗忘 facts。
+  - forget()：软删除 + owner 隔离。
+- worker 新增 fact_extraction 任务类型：抽取放后台异步，不阻塞用户眼前这轮回答。
+- rag.answer / rag.answer_stream 在拼 Prompt 前注入【用户长期记忆】段（检索与当前问题
+  top-k 相关的 facts），rag_prompt.py 的 SYSTEM_PROMPT 加 user_facts 占位。
+- 新增 GET /api/facts（列出）与 DELETE /api/facts/{id}（遗忘，软删除）。
+- postgres 镜像 postgres:16-alpine 换成 pgvector/pgvector:pg16（官方 alpine 版不带 vector
+  扩展；数据目录兼容，换镜像零迁移）。
+
+## 2. 关键设计决定
+
+1. 抽取放 worker，不是请求线程：抽取是一次额外 LLM 调用，没理由拖慢眼前这轮回答；
+   facts 只服务「以后」的对话。
+2. 记忆是增强，不是硬依赖：队列不可用 / fact_store 不可用 / embedding 失败，全都
+   静默降级（返回空串/空列表），绝不影响主链路回答。
+3. 「忘掉」是软删除：审计 + 可恢复；owner 隔离在 SQL 的 WHERE 里。
+4. 检索用 pgvector，不新引向量库：user_facts 就几十上百条，PG 的 vector 类型够用，
+   且 embedding 与知识库共用同一 EMBEDDING_* 配置（同一向量空间）。
+
+## 3. 踩过的坑（真·排查成本）
+
+1. .format() 把 JSON 示例当占位符：抽取 prompt 用 .format(user_msg=..., ai_msg=...)
+   填充，而 prompt 里的 JSON 示例 {"fact": ...} 会被 .format() 误当 {fact} 占位符，
+   抛 KeyError: 'fact'。修法：prompt 里所有字面量花括号写成 {{ }} 转义。
+   教训：用 .format() 填充的模板串，先扫一遍有没有「本想当字面量」的花括号。
+2. 新会话不能传 session_id：/api/chat 对不存在的 session_id 返回 404
+   （session_exists_for_user 检查）。验收脚本第一轮必须传空 session_id，让后端
+   _new_session_id 生成，再从返回里取回真实 id。这是既有行为，不是本次引入。
+
+## 4. 验收口径（7 项断言全 PASS）
+
+- LLM 抽中「用户偏好简洁直接的答案」（preference 类，精准抓到「简洁直接」）。
+- 每轮对话后 worker 异步抽取，user_facts 表出现新行。
+- embedding 全生成（无空向量）；<=> 余弦检索排序正确（sim=1 是自身）。
+- 软删除 forgotten=t；重复遗忘 404；越权遗忘 404（不影响他人）；忘掉后检索不到。
+
+## 5. 回滚
+
+```bash
+cd ~/phase1-rag
+git revert 4a17d7b   # 代码层面回滚
+# postgres 镜像回退：compose 里 image 改回 postgres:16-alpine 后
+docker compose up -d postgres   # volume 数据兼容，无需迁移
+# user_facts 表与已写入 facts：代码回滚后旧代码不读它们，留着无害；
+# 要彻底清掉则 DROP TABLE user_facts;（DROP EXTENSION vector 需先删表）
+```

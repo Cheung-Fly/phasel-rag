@@ -29,6 +29,7 @@ import { useComposer } from './useComposer.js';
 import { setBrowserHandoffActive } from './useBrowserHandoff.js';
 import { useAssistantMode } from './useAssistantMode.js';
 import { useAuditTimeline } from './useAuditTimeline.js';
+import { useApprovals } from './useApprovals.js';
 import * as storage from '../lib/storage.js';
 
 /* 消息形状：
@@ -90,6 +91,7 @@ export function useChat() {
   const { currentId, upsert, setCurrent, removeLocal, sync } = useSessions();
   const { requestFocus } = useComposer();
   const { refresh: refreshAuditTimeline } = useAuditTimeline();
+  const { refresh: refreshApprovals } = useApprovals();
 
   /* ---------------------------------------------------------- 发送 */
   async function send(text, opts = {}) {
@@ -170,6 +172,14 @@ export function useChat() {
               bot.pendingApproval = ev.approval || null;
               break;
 
+            case 'shell_approval':
+              // 终端命令审批（run_shell）：与网页点击同一套闸门、同一张卡片，
+              // 只是卡片内容是「命令 + 人话翻译」、执行后回显 stdout。
+              // 后端事件名刻意区分（shell_approval / click_approval），
+              // 但前端载体刻意共用 —— 两种审批对用户的交互语义完全一致。
+              bot.pendingApproval = ev.approval || null;
+              break;
+
             case 'token':
               if (tFirst === null) tFirst = performance.now();
               chunks++;
@@ -241,14 +251,21 @@ export function useChat() {
    * 而且它本来就不在服务端的会话记忆里（执行走的是另一个接口），
    * 另发一条反而会在重新载入会话时凭空消失。
    */
-  function settleApproval({ index, outcome, message }) {
+  function settleApproval({ index, outcome, message, detail }) {
     const msg = messages.value[index];
     if (!msg || !msg.pendingApproval || msg.pendingApproval.settled) return;
-    msg.pendingApproval = { ...msg.pendingApproval, settled: true, outcome, message };
+    // detail 是终端命令执行后的 stdout/exit_code 回写：合并进 pendingApproval，
+    // 让 ClickApprovalCard 能立即回显「命令输出了什么」，而不是点完就消失。
+    const next = { ...msg.pendingApproval, settled: true, outcome, message };
+    if (detail) next.detail = { ...(msg.pendingApproval.detail || {}), ...detail };
+    msg.pendingApproval = next;
     // 卡片落了终态就等于后端刚写下一条审计事件，顺手把时间线重取一次 ——
     // 于是「我批准了什么」与「它记下了什么」在屏幕上同时出现，可以互相对照。
     // 只是重取服务端数据，**不是**在本地往列表里插一行（那会打乱游标分页）。
     refreshAuditTimeline();
+    // 侧栏「待批准操作」面板也要跟着刷：消息卡片落定后，面板里那条
+    // 若还挂在「待批准」上就是假象。这里和审计一样是重取服务端，不是本地改。
+    refreshApprovals();
   }
 
   /* ---------------------------------------------------------- 停止 */

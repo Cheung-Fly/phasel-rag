@@ -168,10 +168,46 @@ def _execute_fact_extraction(task: dict, ctx: _RunContext) -> dict:
     return {"extracted": len(facts), "written": written}
 
 
+def _execute_suggestion_action(task: dict, ctx: _RunContext) -> dict:
+    """任务类型 suggestion_action 的执行体：把被采纳的建议展开成可执行计划（阶段 D ②）。
+
+    「采纳建议」在 API 侧只是把建议从 pending 转成 accepted 并登记一个任务。
+    真正的产出在这里：调 LLM 把一句建议（如「帮你整理本周复习计划」）展开成
+    一份具体的、带步骤的计划文本，作为任务结果返回，前端任务面板可读。
+
+    这是增强动作：LLM 失败只影响这份计划的产出，不影响「建议已采纳」这一事实。
+    """
+    from .llm import get_chat_model
+
+    payload = task.get("payload") or {}
+    suggestion = payload.get("suggestion") or ""
+    reason = payload.get("reason") or ""
+    if not suggestion:
+        raise RuntimeError("任务数据缺少 suggestion，无法展开")
+
+    model = get_chat_model(temperature=0.0)
+    prompt = (
+        "你是个人助手。用户采纳了下面这条主动建议，请把它展开成一份可立即执行的计划。\n"
+        f"建议：{suggestion}\n"
+        f"依据：{reason or '（无）'}\n\n"
+        "要求：\n"
+        "- 用简体中文，输出 3~6 个具体步骤，每步一句话、可执行\n"
+        "- 不做假设用户不知道的信息，不要求敏感操作（发邮件/下单/登录）\n"
+        "- 直接输出计划正文，不要寒暄、不要标题"
+    )
+    try:
+        plan = model.invoke(prompt).content
+    except Exception as exc:
+        logger.warning("建议展开 LLM 调用失败（已忽略）: %s", exc)
+        plan = f"已记录你的采纳：{suggestion}"
+    return {"suggestion": suggestion, "plan": plan}
+
+
 # 任务类型 → 执行体。阶段 C/D 增加站点操作、记忆整理等任务时在这里登记即可。
 EXECUTORS = {
     "document_ingest": _execute_document_ingest,
     "fact_extraction": _execute_fact_extraction,
+    "suggestion_action": _execute_suggestion_action,
 }
 
 

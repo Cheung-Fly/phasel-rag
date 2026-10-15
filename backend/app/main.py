@@ -80,6 +80,7 @@ from .site_store import (
     get_site_store_or_none,
     match_site,
 )
+from .suggestion_store import get_suggestion_store
 from .task_store import close_task_store, get_task_store, get_task_store_or_none
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -1972,6 +1973,74 @@ def forget_fact(
     if not get_fact_store().forget(user.user_id, fact_id):
         raise HTTPException(404, "未找到该条长期记忆")
     return {"fact_id": fact_id, "forgotten": True}
+
+
+# ---------------------------------------------------------------- 主动建议（阶段 D ②）
+# 「主动」的落地形态：用户下次打开页面 / 发消息时，前端调 GET /api/suggestions
+# 拉待决定的建议；后端在返回前若发现「没有 pending 建议但事实充足」，会
+# 现场推断一批。采纳 → POST /api/suggestions/{id}/accept 转成后台任务；
+# 忽略 → dismiss，冷却期内同类建议不再重复推送。
+@app.get("/api/suggestions", tags=["记忆"], summary="列出主动建议（必要时现场推断）")
+def list_suggestions(
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    """返回待用户决定的主动建议（pending）。
+
+    若当前没有任何 pending 建议，则基于 user_facts 现场推断一批并落库。
+    「入口触发」的含义就落在这里：推断发生在用户主动来访时，而非后台定时。
+    推断失败（无 facts / LLM 挂 / PG 不可用）返回空列表，不报错。
+    """
+    store = get_suggestion_store()
+    pending = store.list_pending(user.user_id)
+    if not pending:
+        # 没有待决定的建议时才推断，避免每刷新一次就重复生成、骚扰用户。
+        store.generate(user.user_id)
+        pending = store.list_pending(user.user_id)
+    return {"suggestions": pending}
+
+
+@app.post("/api/suggestions/{suggestion_id}/accept", tags=["记忆"], summary="采纳建议并转为后台任务")
+def accept_suggestion(
+    suggestion_id: str,
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    """采纳一条建议：pending → accepted，并复用阶段 B 队列生成一个后台任务。
+
+    任务类型 `suggestion_action`，payload 带建议原文，供 worker 后续执行
+    （本轮只登记任务，worker 端的实际动作留待后续扩展；任务会进队列并在
+    worker 领取后按未知类型安全失败，不会污染队列 —— 见 worker.EXECUTORS）。
+    """
+    store = get_suggestion_store()
+    updated = store.accept(user.user_id, suggestion_id)
+    if updated is None:
+        raise HTTPException(404, "未找到该建议，或它已不是待决定状态")
+
+    task = None
+    task_store = get_task_store_or_none()
+    if task_store is not None:
+        try:
+            task = task_store.enqueue(
+                "suggestion_action",
+                user.user_id,
+                {"suggestion": updated["suggestion"], "reason": updated["reason"]},
+            )
+        except Exception as exc:
+            # 队列不可用只是「转任务」这一步失败，采纳本身已生效；
+            # 不能让一个增强动作拖垮主链路。
+            logger.info("采纳建议后入队失败（已跳过）: %s", exc)
+    return {"suggestion": updated, "task": task}
+
+
+@app.post("/api/suggestions/{suggestion_id}/dismiss", tags=["记忆"], summary="忽略建议")
+def dismiss_suggestion(
+    suggestion_id: str,
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    """忽略一条建议：pending → dismissed。冷却期内同类建议不再推送。"""
+    updated = get_suggestion_store().dismiss(user.user_id, suggestion_id)
+    if updated is None:
+        raise HTTPException(404, "未找到该建议，或它已不是待决定状态")
+    return {"suggestion": updated}
 
 
 # ---------------------------------------------------------------- 根路径

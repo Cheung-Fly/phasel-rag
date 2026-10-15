@@ -12,6 +12,7 @@ import TaskPanel from './TaskPanel.vue';
 import SitePanel from './SitePanel.vue';
 import ApprovalPanel from './ApprovalPanel.vue';
 import AuditTimelinePanel from './AuditTimelinePanel.vue';
+import SuggestionPanel from './SuggestionPanel.vue';
 import SessionList from './SessionList.vue';
 import HealthStatus from './HealthStatus.vue';
 
@@ -36,6 +37,9 @@ defineProps({
          「登录 XX」这句话本身也只在个人助手里才有意义。 -->
     <template v-else>
       <SitePanel />
+      <!-- 主动建议放最上：它是「助手基于记忆想主动提醒你的事」，
+           比「等你点头的审批」和「已经做过的事」都更该先看到（阶段 D ②）。 -->
+      <SuggestionPanel />
       <!-- 待批准操作放在审计时间线**上方**：先看到「等我点头的事」，
            再看「已经做过的事」。二者一前一后，构成完整的信任闭环。 -->
       <ApprovalPanel />

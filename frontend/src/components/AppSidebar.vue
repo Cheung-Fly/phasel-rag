@@ -10,6 +10,7 @@ import UploadPanel from './UploadPanel.vue';
 import DocumentList from './DocumentList.vue';
 import TaskPanel from './TaskPanel.vue';
 import SitePanel from './SitePanel.vue';
+import ApprovalPanel from './ApprovalPanel.vue';
 import AuditTimelinePanel from './AuditTimelinePanel.vue';
 import SessionList from './SessionList.vue';
 import HealthStatus from './HealthStatus.vue';
@@ -35,8 +36,11 @@ defineProps({
          「登录 XX」这句话本身也只在个人助手里才有意义。 -->
     <template v-else>
       <SitePanel />
-      <!-- 紧随站点面板：回答的都是「助手在校园里做过/能做什么」，
-           而且时间线里的操作事件大多源自站点上的点击（阶段 C ④）。 -->
+      <!-- 待批准操作放在审计时间线**上方**：先看到「等我点头的事」，
+           再看「已经做过的事」。二者一前一后，构成完整的信任闭环。 -->
+      <ApprovalPanel />
+      <!-- 紧随其后：回答的都是「助手在校园里做过/能做什么」，
+           时间线里的操作事件大多源自站点上的点击（阶段 C ④）。 -->
       <AuditTimelinePanel />
     </template>
     <SessionList />

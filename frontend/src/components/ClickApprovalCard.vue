@@ -38,6 +38,29 @@ let timer = null;
 const settled = computed(() => Boolean(props.approval.settled));
 const outcome = computed(() => props.approval.outcome || '');
 
+/* ★ 终端执行（run_shell）与网页点击（click_element）是两种审批。
+   终端审批展示的是「命令 + 人话翻译」，执行后要回显 stdout/exit_code；
+   点击审批展示的是「目标控件」，执行后要回显跳转结果。 */
+const isShell = computed(() => props.approval.action === 'run_shell');
+
+/** 后端生成的「人话翻译」：用户不用懂 shell 也能判断这条命令在做什么。 */
+const shellSummary = computed(() => {
+  const d = props.approval.detail || {};
+  return typeof d.summary === 'string' && d.summary ? d.summary : '';
+});
+
+/** 执行后回显的命令输出（stdout，已由后端截断）。 */
+const shellStdout = computed(() => {
+  const d = props.approval.detail || {};
+  return typeof d.stdout === 'string' ? d.stdout : '';
+});
+
+/** 执行后回显的退出码。注意 0 是合法的成功退出码，不能当「没有」处理。 */
+const shellExitCode = computed(() => {
+  const d = props.approval.detail || {};
+  return typeof d.exit_code === 'number' ? d.exit_code : null;
+});
+
 /** 服务器给的过期时刻；解析不出来就不显示倒计时（服务端仍会兜住）。 */
 const deadline = computed(() => {
   const parsed = Date.parse(props.approval.expires_at || '');
@@ -50,9 +73,9 @@ const remaining = computed(() =>
 const expired = computed(() => remaining.value !== null && remaining.value <= 0);
 
 /** 落一个终态。幂等 —— 定时器与用户点击可能同时触发。 */
-function settle(state, message) {
+function settle(state, message, extra = {}) {
   if (settled.value) return;
-  emit('settle', { outcome: state, message });
+  emit('settle', { outcome: state, message, ...extra });
 }
 
 function tick() {
@@ -89,18 +112,37 @@ async function approveAndExecute() {
     const result = await api.executeApproval(props.approval.approval_id);
     running.value = false;
     if (result.status === 'executed') {
-      // ★ 不写「页面标题不可用」：点击常常伴随跳转，此时浏览器读到的 title
-      //   经常还是空的。一句「不可用」会让一次**成功**的点击读起来像失败。
-      //   标题缺失就退到路径 —— 路径来自 urlparse，跳转后一定有值。
-      const page = result.page || {};
-      const where = page.title
-        ? `当前页面：${page.title}`
-        : page.path
-          ? `已跳转到：${page.path}`
-          : '';
-      settle('executed', `已按你的批准点击该控件。${where}`.trim());
+      if (isShell.value) {
+        // ★ 终端命令执行成功：把 stdout/exit_code 写回审批对象，
+        //   让卡片立即回显「命令输出了什么」。这正是 Q5「结果回显在卡片自身」的落点。
+        const detail = { ...(props.approval.detail || {}) };
+        if (result.stdout !== undefined) detail.stdout = result.stdout;
+        if (result.exit_code !== undefined) detail.exit_code = result.exit_code;
+        emit('settle', {
+          outcome: 'executed',
+          message: '已执行。',
+          detail,
+        });
+      } else {
+        // ★ 不写「页面标题不可用」：点击常常伴随跳转，此时浏览器读到的 title
+        //   经常还是空的。一句「不可用」会让一次**成功**的点击读起来像失败。
+        //   标题缺失就退到路径 —— 路径来自 urlparse，跳转后一定有值。
+        const page = result.page || {};
+        const where = page.title
+          ? `当前页面：${page.title}`
+          : page.path
+            ? `已跳转到：${page.path}`
+            : '';
+        settle('executed', `已按你的批准点击该控件。${where}`.trim());
+      }
     } else if (result.status === 'expired') {
       settle('expired', '这次点击已经作废（页面上的待点击项已消失），什么都没有执行。');
+    } else if (result.status === 'failed') {
+      // 终端命令执行失败：后端把原因放在 reason 里（forbidden/timeout/...），
+      // 如实告诉用户这条命令为什么没成。
+      settle('failed', isShell.value
+        ? `命令未能执行${result.reason ? `（${result.reason}）` : ''}。`
+        : '页面控件已变化或点击失败，未能确认结果；请到网站上核对。');
     } else {
       settle('failed', '页面控件已变化或点击失败，未能确认结果；请到网站上核对。');
     }
@@ -129,15 +171,37 @@ async function reject() {
 <template>
   <div class="msg-approval" :class="`approval-${outcome || 'pending'}`">
     <div class="approval-head">
-      <span class="approval-label">等待批准的一次点击</span>
+      <span class="approval-label">
+        {{ isShell ? '等待批准的一条终端命令' : '等待批准的一次点击' }}
+      </span>
       <span v-if="!settled && remaining !== null" class="approval-timer">
         {{ remaining }} 秒后自动放弃
       </span>
     </div>
 
-    <p class="approval-target">{{ approval.target }}</p>
+    <!-- 终端命令：命令文本 + 后端生成的人话翻译（用户不用懂 shell 也能判断） -->
+    <template v-if="isShell">
+      <p class="approval-target"><code class="approval-cmd">{{ approval.target }}</code></p>
+      <p v-if="shellSummary" class="approval-summary">{{ shellSummary }}</p>
+    </template>
+    <!-- 网页点击：目标控件文本 -->
+    <template v-else>
+      <p class="approval-target">{{ approval.target }}</p>
+    </template>
 
     <p v-if="settled" class="approval-result">{{ approval.message }}</p>
+
+    <!-- 终端命令执行成功后，回显 stdout/exit_code（Q5：结果回显在卡片自身） -->
+    <div v-if="settled && isShell && outcome === 'executed' && (shellStdout || shellExitCode !== null)" class="approval-output">
+      <div class="approval-output-head">
+        <span>命令输出</span>
+        <span v-if="shellExitCode !== null" class="approval-exit" :class="shellExitCode === 0 ? 'ok' : 'err'">
+          退出码 {{ shellExitCode }}
+        </span>
+      </div>
+      <pre v-if="shellStdout" class="approval-stdout">{{ shellStdout }}</pre>
+      <p v-else class="approval-output-empty">（无输出）</p>
+    </div>
 
     <template v-else>
       <div class="approval-actions">

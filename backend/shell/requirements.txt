@@ -1,0 +1,5 @@
+mcp==1.30.0
+fastapi==0.116.1
+uvicorn==0.35.0
+# Keep the MCP v1 SDK on its tested Pydantic 2.11 compatibility range.
+pydantic>=2.11,<2.12

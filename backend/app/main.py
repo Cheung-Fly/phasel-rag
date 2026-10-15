@@ -69,6 +69,7 @@ from .auth_store import (
     session_cookie_settings,
 )
 from .config import get_settings
+from .fact_store import get_fact_store
 from .memory import get_memory
 from .observability import CircuitBreaker, RuntimeMetrics, SlidingWindowRateLimiter
 from .site_store import (
@@ -361,6 +362,24 @@ def _new_session_id(mode: str) -> str:
 def _validate_session_mode(session_id: str, mode: str) -> None:
     if session_id.startswith("student_") != (mode == "student"):
         raise HTTPException(404, "未找到该会话")
+
+
+def _enqueue_fact_extraction(
+    owner_user_id: str,
+    session_id: str,
+    user_msg: str,
+    ai_msg: str,
+) -> None:
+    """在每轮对话后，异步登记一次「长期记忆抽取」任务（阶段 D）。
+
+    为什么放 worker 而不是请求线程里直接调 LLM 抽取：
+      抽取是一次额外的 LLM 调用，会显著拖慢用户眼前这轮回答的返回；
+      而抽取结果（facts）只服务于「以后」的对话，没有任何理由阻塞现在。
+
+    实现复用 rag 层的同一函数（那里同时服务 school 模式的流式/非流式），
+    避免「入队逻辑」散落两处导致口径分裂。
+    """
+    rag._enqueue_fact_extraction(owner_user_id, session_id, user_msg, ai_msg)
 
 
 async def _call_browser_mcp(browser_url: str, tool_name: str, arguments: dict) -> str:
@@ -1714,6 +1733,7 @@ def chat(
                 user, target
             )
             get_memory().append_for_user(user.user_id, session_id, req.question, answer)
+            _enqueue_fact_extraction(user.user_id, session_id, req.question, answer)
             return {
                 "answer": answer,
                 "sources": [],
@@ -1727,6 +1747,9 @@ def chat(
             get_memory().append_for_user(
                 user.user_id, session_id, req.question, shell_task["answer"]
             )
+            _enqueue_fact_extraction(
+                user.user_id, session_id, req.question, shell_task["answer"]
+            )
             return {
                 "answer": shell_task["answer"],
                 "sources": [],
@@ -1735,6 +1758,7 @@ def chat(
             }
         task = _answer_browser_task(req.question, user, session_id)
         get_memory().append_for_user(user.user_id, session_id, req.question, task["answer"])
+        _enqueue_fact_extraction(user.user_id, session_id, req.question, task["answer"])
         return {
             "answer": task["answer"],
             "sources": [],
@@ -1744,7 +1768,11 @@ def chat(
             "click_approval": task["approval"],
         }
     try:
-        return rag.answer(req.question, session_id, user.user_id)
+        result = rag.answer(req.question, session_id, user.user_id)
+        _enqueue_fact_extraction(
+            user.user_id, session_id, req.question, result.get("answer", "")
+        )
+        return result
     except PermissionError as exc:
         raise HTTPException(404, "未找到该会话") from exc
     except Exception as exc:
@@ -1804,6 +1832,7 @@ def chat_stream(
                     if browser_session_active:
                         yield sse({"type": "browser_session", "active": True})
                     get_memory().append_for_user(user.user_id, session_id, req.question, answer)
+                    _enqueue_fact_extraction(user.user_id, session_id, req.question, answer)
                     yield sse({"type": "token", "text": answer})
                     yield sse({"type": "done", "session_id": session_id})
                     return
@@ -1813,6 +1842,9 @@ def chat_stream(
                     if shell_task["shell_approval"]:
                         yield sse({"type": "shell_approval", "approval": shell_task["shell_approval"]})
                     get_memory().append_for_user(
+                        user.user_id, session_id, req.question, shell_task["answer"]
+                    )
+                    _enqueue_fact_extraction(
                         user.user_id, session_id, req.question, shell_task["answer"]
                     )
                     yield sse({"type": "token", "text": shell_task["answer"]})
@@ -1826,6 +1858,7 @@ def chat_stream(
                 get_memory().append_for_user(
                     user.user_id, session_id, req.question, task["answer"]
                 )
+                _enqueue_fact_extraction(user.user_id, session_id, req.question, task["answer"])
                 yield sse({"type": "token", "text": task["answer"]})
                 yield sse({"type": "done", "session_id": session_id})
                 return
@@ -1911,6 +1944,34 @@ def clear_history(
     if not get_memory().clear_for_user(user.user_id, session_id):
         raise HTTPException(404, "未找到该会话")
     return {"session_id": session_id, "cleared": True}
+
+
+# ---------------------------------------------------------------- 长期记忆（阶段 D）
+@app.get("/api/facts", tags=["记忆"], summary="列出长期记忆（user_facts）")
+def list_facts(
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    """返回助手记录的关于当前用户的长期事实。
+
+    每条含事实内容、类型（preference/habit/topic）、置信度与出处
+    （哪次会话）。「忘掉」走 DELETE /api/facts/{id}（软删除）。
+    """
+    return {"facts": get_fact_store().list_facts(user.user_id)}
+
+
+@app.delete("/api/facts/{fact_id}", tags=["记忆"], summary="忘掉某条长期记忆")
+def forget_fact(
+    fact_id: int,
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    """软删除一条长期记忆（forgotten=true），之后检索不再命中。
+
+    返回 404 当且仅当该 fact 不存在、不属于当前用户、或已经被忘掉 ——
+    三者语义一致（都是「没有可操作的这条记忆」）。
+    """
+    if not get_fact_store().forget(user.user_id, fact_id):
+        raise HTTPException(404, "未找到该条长期记忆")
+    return {"fact_id": fact_id, "forgotten": True}
 
 
 # ---------------------------------------------------------------- 根路径

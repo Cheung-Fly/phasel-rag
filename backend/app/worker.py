@@ -141,9 +141,37 @@ def _execute_document_ingest(task: dict, ctx: _RunContext) -> dict:
     )
 
 
+def _execute_fact_extraction(task: dict, ctx: _RunContext) -> dict:
+    """任务类型 fact_extraction 的执行体：从一轮对话抽取长期记忆（阶段 D）。
+
+    这是「增强」而非主链路：抽取失败（LLM 挂了、embedding 挂了）只影响
+    长期记忆的完整性，绝不影响用户眼前这轮已经拿到手的回答。因此这里
+    任何异常都转成「抽取 0 条」的成功返回，而不是让任务进入 failed 重试
+    —— 记忆抽取不值得为它重烧配额、反复打扰。
+    """
+    from .fact_store import get_fact_store
+
+    payload = task.get("payload") or {}
+    user_msg = payload.get("user_msg") or ""
+    ai_msg = payload.get("ai_msg") or ""
+    source_session_id = payload.get("session_id") or ""
+    source_message_id = payload.get("message_id")
+    owner_user_id = task["owner_user_id"]
+    if not user_msg or not source_session_id:
+        raise RuntimeError("任务数据缺少 user_msg / session_id，无法抽取")
+
+    store = get_fact_store()
+    facts = store.extract(user_msg, ai_msg)
+    written = store.upsert_facts(
+        owner_user_id, facts, source_session_id, source_message_id
+    )
+    return {"extracted": len(facts), "written": written}
+
+
 # 任务类型 → 执行体。阶段 C/D 增加站点操作、记忆整理等任务时在这里登记即可。
 EXECUTORS = {
     "document_ingest": _execute_document_ingest,
+    "fact_extraction": _execute_fact_extraction,
 }
 
 

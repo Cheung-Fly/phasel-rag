@@ -251,6 +251,30 @@ class ApprovalStoreTests(unittest.TestCase):
         self.assertEqual(done["status"], STATUS_EXECUTED)
         self.assertIsNotNone(done["executed_at"])
 
+    def test_merge_detail_persists_execution_result(self):
+        """merge_detail 应把执行结果（stdout/artifacts）写回审批记录 detail 列，
+        供前端刷新后读回；且不覆盖原 detail 里的脚本/摘要等既有键。"""
+        approval = self._new(action="data_analysis", detail={"script": "print(1)", "summary": "统计"})
+        self.store.approve(self.owner, approval["approval_id"])
+        self.store.begin_execution(self.owner, approval["approval_id"])
+
+        done = self.store.complete_execution(
+            self.owner,
+            approval["approval_id"],
+            outcome=STATUS_EXECUTED,
+            detail={"exit_code": 0},
+            merge_detail={"exit_code": 0, "stdout": "均值 5.0", "artifacts": ["chart.png"]},
+        )
+
+        self.assertEqual(done["status"], STATUS_EXECUTED)
+        reloaded = self.store.get(self.owner, approval["approval_id"])
+        self.assertEqual(reloaded["detail"]["stdout"], "均值 5.0")
+        self.assertEqual(reloaded["detail"]["artifacts"], ["chart.png"])
+        self.assertEqual(reloaded["detail"]["exit_code"], 0)
+        # 原 detail 键不被 merge_detail 冲掉
+        self.assertEqual(reloaded["detail"]["script"], "print(1)")
+        self.assertEqual(reloaded["detail"]["summary"], "统计")
+
     def test_failure_outcome_keeps_the_reason(self):
         approval = self._new()
         self.store.approve(self.owner, approval["approval_id"])

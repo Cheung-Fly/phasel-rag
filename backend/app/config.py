@@ -103,6 +103,13 @@ class Settings(BaseSettings):
     # 上传文件落盘目录（向量数据已不在 API 这一侧）
     upload_dir: str = "/app/data/uploads"
 
+    # 数据分析图表回传目录（只读）。
+    # shell 沙箱把图表 savefig 到它挂载的 /work（宿主机 ./data/shell-work）；
+    # api 容器以只读方式挂载同一目录（见 docker-compose.yml api 的 volumes），
+    # 经 GET /api/artifacts/{file} 把图表读回前端。与 upload_dir 分开：
+    # 图表是「分析产物」，上传文件是「待入库源文件」，生命周期与清理语义不同。
+    analysis_artifact_dir: str = "/app/data/shell-work"
+
     # ---------- 前端 ----------
     # 2026-10-07 起本服务**不再托管任何前端**。
     # 原本这里是 frontend_dir，指向 compose 挂进来的 ./frontend，

@@ -64,6 +64,17 @@ const shellExitCode = computed(() => {
   return typeof d.exit_code === 'number' ? d.exit_code : null;
 });
 
+/** 数据分析生成的图表文件名列表（回传后渲染 <img>）。 */
+const artifacts = computed(() => {
+  const d = props.approval.detail || {};
+  return Array.isArray(d.artifacts) ? d.artifacts : [];
+});
+
+/** 图表文件的访问 URL（经 nginx 反代到 /api/artifacts/{file}）。 */
+function artifactUrl(name) {
+  return `/api/artifacts/${encodeURIComponent(name)}`;
+}
+
 /** 服务器给的过期时刻；解析不出来就不显示倒计时（服务端仍会兜住）。 */
 const deadline = computed(() => {
   const parsed = Date.parse(props.approval.expires_at || '');
@@ -121,6 +132,9 @@ async function approveAndExecute() {
         const detail = { ...(props.approval.detail || {}) };
         if (result.stdout !== undefined) detail.stdout = result.stdout;
         if (result.exit_code !== undefined) detail.exit_code = result.exit_code;
+        // ★ 数据分析图表回传：把本次生成的图表文件名写回 detail.artifacts，
+        //   卡片据此渲染 <img>，让用户真正「看到」分析出的图（闭环的最后一环）。
+        if (Array.isArray(result.artifacts)) detail.artifacts = result.artifacts;
         emit('settle', {
           outcome: 'executed',
           message: isAnalysis.value ? '分析已完成。' : '已执行。',
@@ -209,6 +223,14 @@ async function reject() {
       </div>
       <pre v-if="shellStdout" class="approval-stdout">{{ shellStdout }}</pre>
       <p v-else class="approval-output-empty">（无输出）</p>
+    </div>
+
+    <!-- 数据分析执行成功后回传的图表（闭环最后一环：让用户真正看到图） -->
+    <div v-if="settled && isAnalysis && outcome === 'executed' && artifacts.length" class="approval-artifacts">
+      <figure v-for="name in artifacts" :key="name" class="approval-figure">
+        <img :src="artifactUrl(name)" :alt="name" loading="lazy" class="approval-chart" />
+        <figcaption class="approval-figcaption">{{ name }}</figcaption>
+      </figure>
     </div>
 
     <template v-else>

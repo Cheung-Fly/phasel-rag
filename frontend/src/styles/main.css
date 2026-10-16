@@ -501,6 +501,21 @@ body { overflow: hidden; }
   max-height: 160px; overflow: auto;
 }
 .approval-output-empty { margin: 6px 0 0; font-size: 11.5px; color: var(--text-faint); }
+
+/* 数据分析回传图表区（闭环最后一环：让用户真正看到图）。 */
+.approval-artifacts {
+  margin-top: 8px; display: flex; flex-direction: column; gap: 8px;
+}
+.approval-figure { margin: 0; }
+.approval-chart {
+  display: block; max-width: 100%; height: auto;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: #fff;
+}
+.approval-figcaption {
+  margin-top: 4px; font-size: 10.5px; color: var(--text-faint);
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+}
 .btn-confirm {
   border: 0; cursor: pointer;
   padding: 7px 14px; border-radius: var(--radius-sm);

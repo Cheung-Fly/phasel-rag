@@ -27,6 +27,8 @@ import asyncio
 import base64
 import ipaddress
 import logging
+import os
+import posixpath
 import threading
 import uuid
 import time
@@ -35,7 +37,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
@@ -1407,13 +1409,26 @@ async def _execute_analysis_approval(
     status = result.get("status")
     exit_code = result.get("exit_code")
     stdout = result.get("stdout", "")
+    artifacts = result.get("artifacts") or []
 
     if status == "executed":
+        # ★ 结果持久化：stdout 与图表文件名列表写回审批记录 detail 列
+        #   （merge_detail），前端刷新后仍能读回统计结论与图表，而非一闪而过。
         store.complete_execution(
             user.user_id, approval_id, outcome=STATUS_EXECUTED,
             detail={"exit_code": exit_code, "stdout": stdout[:2000]},
+            merge_detail={
+                "exit_code": exit_code,
+                "stdout": stdout[:4000],
+                "artifacts": [str(a) for a in artifacts],
+            },
         )
-        return {"status": STATUS_EXECUTED, "exit_code": exit_code, "stdout": stdout}
+        return {
+            "status": STATUS_EXECUTED,
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "artifacts": [str(a) for a in artifacts],
+        }
     if status == "timeout":
         store.complete_execution(
             user.user_id, approval_id, outcome=STATUS_FAILED,
@@ -1431,6 +1446,58 @@ async def _execute_analysis_approval(
         detail={"reason": status or "unknown_status"},
     )
     return {"status": STATUS_FAILED, "reason": status or "unknown_status", "stdout": stdout}
+
+
+@app.get("/api/artifacts/{filename}", tags=["数据分析"], summary="读取数据分析生成的图表文件")
+def get_analysis_artifact(
+    filename: str,
+    user: AuthenticatedUser = Depends(_current_user),
+) -> FileResponse:
+    """把 shell 沙箱里 savefig 出来的图表读回前端。
+
+    安全要点：
+    - 只允许白名单扩展名（图片），不把数据文件/脚本当静态资源吐出去；
+    - 文件名经 posixpath.normpath 校验，且必须是「纯文件名」（不含路径分隔符），
+      杜绝 `../` 路径穿越逃出 /app/data/shell-work；
+    - 目录是 api 容器只读挂载的 shell-work（与 shell 沙箱共享的宿主机卷），
+      本进程只读，不写。
+
+    ★ 为什么不做 owner 隔离：图表文件名由 run_analysis 返回、由 api 写入审批
+      记录 detail.artifacts，前端只能拿到自己会话审批记录里出现过的文件名。
+      但本路由只按文件名取文件，AUTH_MODE=local 下无鉴权，任何能连上的人都能
+      枚举文件名读图 —— 与「GET /api/credentials 能列出全部凭证 ID」同一档
+      已知缺口，不做 PII 防护（图表也不含 PII）。
+    """
+    # 拒绝空名与路径分隔符：只允许「纯文件名」，其余一律 404（不泄露目录结构）。
+    if not filename or "/" in filename or "\\" in filename:
+        raise HTTPException(404, "未找到该图表")
+    if posixpath.normpath(filename) != filename or filename.startswith("."):
+        raise HTTPException(404, "未找到该图表")
+
+    # 白名单扩展名，且必须精确匹配（防止 `x.png.txt` 之类绕过）。
+    _, ext = posixpath.splitext(filename)
+    if ext.lower() not in (".png", ".svg", ".jpg", ".jpeg", ".webp"):
+        raise HTTPException(404, "未找到该图表")
+
+    artifact_dir = get_settings().analysis_artifact_dir
+    path = os.path.join(artifact_dir, filename)
+    # 再兜一层：join 之后仍在 artifact_dir 内（防御 normpath 之外的意外）。
+    real_root = os.path.realpath(artifact_dir)
+    real_path = os.path.realpath(path)
+    if not (real_path == real_root or real_path.startswith(real_root + os.sep)):
+        raise HTTPException(404, "未找到该图表")
+
+    if not os.path.isfile(path):
+        raise HTTPException(404, "未找到该图表")
+
+    media_type = {
+        ".png": "image/png",
+        ".svg": "image/svg+xml",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }[ext.lower()]
+    return FileResponse(path, media_type=media_type, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/approvals", tags=["审批"], summary="列出待处理与最近的操作审批")

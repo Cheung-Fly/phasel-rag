@@ -37,6 +37,25 @@ WORK_DIR = shell_exec.WORK_DIR
 EXEC_TIMEOUT_SECONDS = 10
 ANALYSIS_TIMEOUT_SECONDS = 60  # 数据分析脚本可能跑较久（大表/绘图），放宽到 60s
 
+# 数据分析图表回传：脚本里 savefig 的产物扩展名（白名单，避免把数据文件/脚本当图回传）。
+_ARTIFACT_EXTENSIONS = (".png", ".svg", ".jpg", ".jpeg", ".webp")
+
+
+def _snapshot_image_files() -> set[str]:
+    """扫描 /work 根目录下的图片文件（白名单扩展名），返回文件名集合。
+
+    只列 /work 顶层（图表由脚本 savefig 直接写到 /work 下，不递归）。
+    用于在脚本执行前后取差集，得到「本次执行新生成的图表」。
+    """
+    try:
+        names = os.listdir(WORK_DIR)
+    except Exception:
+        return set()
+    return {
+        name for name in names
+        if name.lower().endswith(_ARTIFACT_EXTENSIONS) and os.path.isfile(os.path.join(WORK_DIR, name))
+    }
+
 mcp = FastMCP(
     "shell-executor",
     host="0.0.0.0",
@@ -190,6 +209,10 @@ def _run_analysis(script: str) -> dict:
     except Exception as exc:
         return {"status": "write_error", "stdout": type(exc).__name__, "exit_code": -1}
 
+    # ★ 图表回传：执行前快照 /work 下的图片文件，执行后取差集，
+    #   得到「本次脚本新生成的图表」。差集而非全量，避免把历史图表误报成本次的。
+    before_images = _snapshot_image_files()
+
     try:
         proc = subprocess.run(
             ["python3", script_path],
@@ -215,7 +238,13 @@ def _run_analysis(script: str) -> dict:
     stderr = shell_exec.redact_output(proc.stderr or "")
     combined = (stdout + ("\n" + stderr if stderr else "")).strip()
     combined = shell_exec.truncate_output(combined)
-    return {"status": "executed", "stdout": combined, "exit_code": proc.returncode}
+
+    # 本次新生成的图表（按文件名排序，保证回传顺序稳定）。
+    new_images = sorted(_snapshot_image_files() - before_images)
+    result = {"status": "executed", "stdout": combined, "exit_code": proc.returncode}
+    if new_images:
+        result["artifacts"] = new_images
+    return result
 
 
 @mcp.tool()

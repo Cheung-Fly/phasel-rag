@@ -344,6 +344,7 @@ class ApprovalStore:
         *,
         outcome: str,
         detail: dict | None = None,
+        merge_detail: dict | None = None,
     ) -> dict | None:
         """executing → 终态。
 
@@ -352,6 +353,10 @@ class ApprovalStore:
           expired  —— 浏览器侧已无待执行项 / 已超时（控件没了，什么都没发生）
           failed   —— 控件变了或点击本身失败（发生了某种变化，但不确定是不是我们要的）
         api 侧的状态自认不算数：把「我们以为点了」写成「点了」是这里最危险的错误。
+
+        detail 仍是审计摘要（写 operation_audit）；merge_detail 才是「写回审批记录
+        本身 detail 列」的执行结果（如终端 stdout、分析图表文件名列表），供前端刷新
+        后读回。两者分开，避免把大段 stdout 也塞进审计流水里。
         """
         if outcome not in (STATUS_EXECUTED, STATUS_EXPIRED, STATUS_FAILED):
             raise ValueError(f"不支持的 outcome: {outcome}")
@@ -365,6 +370,7 @@ class ApprovalStore:
                 ACTION_EXECUTED if outcome == STATUS_EXECUTED else ACTION_EXECUTION_FAILED
             ),
             audit_detail=detail,
+            merge_detail=merge_detail,
         )
 
     def _transition(
@@ -379,10 +385,20 @@ class ApprovalStore:
         audit_detail: dict | None = None,
         audit_key: str | None = None,
         require_unexpired: bool = False,
+        merge_detail: dict | None = None,
     ) -> dict | None:
         expiry_clause = " AND expires_at > now()" if require_unexpired else ""
         placeholders = ", ".join(["%s"] * len(from_statuses))
+        # merge_detail：把执行结果（stdout/artifacts 等）合并进 operation_approvals.detail 列，
+        # 让「执行完的结果」持久化到审批记录本身，前端刷新后仍能读回。
+        # 用 `detail = detail || %s::jsonb`（右值覆盖同名键），不传时保持原样不动。
+        if merge_detail:
+            extra_sql += ", detail = detail || %s::jsonb"
         with self._pool.connection() as connection:
+            params: list = [to_status]
+            if merge_detail:
+                params.append(Jsonb(merge_detail))
+            params += [approval_id, owner_user_id, *from_statuses]
             row = connection.execute(
                 f"""
                 UPDATE operation_approvals
@@ -392,7 +408,7 @@ class ApprovalStore:
                   AND status IN ({placeholders}){expiry_clause}
                 RETURNING *
                 """,
-                (to_status, approval_id, owner_user_id, *from_statuses),
+                tuple(params),
             ).fetchone()
         if row is None:
             return None

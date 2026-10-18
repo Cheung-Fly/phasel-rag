@@ -506,8 +506,31 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # 可选：HTTPS 入口。`docker compose --profile https up -d caddy` 启用，
+  # 需配合 AUTH_MODE=password、AUTH_COOKIE_SECURE=true 与 PUBLIC_DOMAIN。
+  caddy:
+    image: caddy:2-alpine
+    container_name: rag-caddy
+    profiles: ["https"]
+    restart: unless-stopped
+    depends_on:
+      - frontend
+    environment:
+      PUBLIC_DOMAIN: "${PUBLIC_DOMAIN:-}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy-https/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    networks:
+      - default
+
 networks:
   browser_internal:
     driver: bridge
   shell_internal:
     driver: bridge
+
+volumes:
+  caddy_data:

@@ -1,0 +1,8 @@
+# 自动申请并续期 HTTPS 证书。域名由 .env 的 PUBLIC_DOMAIN 提供，
+# 且该域名需已解析到本机，80/443 端口对外可达。
+{$PUBLIC_DOMAIN} {
+	encode gzip
+	reverse_proxy frontend:8080 {
+		flush_interval -1
+	}
+}

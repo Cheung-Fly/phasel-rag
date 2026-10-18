@@ -37,7 +37,9 @@ docker compose up -d --build
 ## 安全模型（请先读）
 
 - 默认 `AUTH_MODE=local`：**没有登录**，所有请求都视为同一个主人。所有端口只绑定 `127.0.0.1`，这是它安全的前提。
-- 需要远程使用：优先用 SSH 隧道；或者放在带认证的 HTTPS 反向代理之后；多人使用请改 `AUTH_MODE=session` 并设置 `AUTH_COOKIE_SECURE=true`。
+- 远程访问自己的服务器：设 `AUTH_MODE=password`、`ACCESS_PASSWORD`（12 位以上）、`AUTH_COOKIE_SECURE=true`，再设 `PUBLIC_DOMAIN`（域名已解析到本机）并执行 `docker compose --profile https up -d caddy`，Caddy 会自动签发 HTTPS 证书。打开网址输入口令即可；改口令后重启 api，旧登录自动失效。口令模式下登录失败有限流。
+- 也可以继续用 SSH 隧道；不要把 `AUTH_MODE=local` 暴露到公网。
+- 多人使用请改 `AUTH_MODE=session` 并设置 `AUTH_COOKIE_SECURE=true`。
 - 不要把端口改成 `0.0.0.0` 暴露到公网。
 - Agent 读取的网页内容和 MCP 返回内容都被视为不可信数据，不会作为指令执行。
 - 密码、Cookie、Token 不写入日志、聊天历史或向量库。

@@ -160,14 +160,49 @@ async function bootstrap() {
   bootError.value = '';
   try {
     const user = await api.authMe();
+    api.health().then((h) => { canLogout.value = h.auth_mode === 'password'; }).catch(() => {});
     setUserScope(user.user_id);
     setCurrent(null);
     await initializeApplication();
   } catch (error) {
     setBrowserHandoffAvailable(false);
+    if (error.status === 401) {
+      needsLogin.value = true;
+      return;
+    }
     bootError.value = error.message || '无法连接本机助手服务';
   } finally {
     booted.value = true;
+  }
+}
+
+const needsLogin = ref(false);
+const canLogout = ref(false);
+const loginPassword = ref('');
+const loginError = ref('');
+const loginBusy = ref(false);
+
+async function submitLogin() {
+  if (!loginPassword.value || loginBusy.value) return;
+  loginBusy.value = true;
+  loginError.value = '';
+  try {
+    await api.authLogin(loginPassword.value);
+    loginPassword.value = '';
+    needsLogin.value = false;
+    await retryBoot();
+  } catch (error) {
+    loginError.value = error.message || '登录失败';
+  } finally {
+    loginBusy.value = false;
+  }
+}
+
+async function logout() {
+  try {
+    await api.authLogout();
+  } finally {
+    window.location.reload();
   }
 }
 
@@ -195,6 +230,14 @@ onUnmounted(() => {
   <main v-if="!booted" class="auth-gate">
     <p>正在启动本机助手…</p>
   </main>
+  <main v-else-if="needsLogin" class="auth-gate">
+    <form class="auth-card" @submit.prevent="submitLogin">
+      <h1>请输入访问口令</h1>
+      <input v-model="loginPassword" type="password" autocomplete="current-password" autofocus placeholder="访问口令" />
+      <p v-if="loginError" class="auth-error" role="alert">{{ loginError }}</p>
+      <button type="submit" :disabled="loginBusy || !loginPassword">登录</button>
+    </form>
+  </main>
   <main v-else-if="bootError" class="auth-gate">
     <div class="auth-card">
       <h1>无法连接到本机助手</h1>
@@ -205,6 +248,7 @@ onUnmounted(() => {
   </main>
   <template v-else>
     <button class="btn-menu" title="显示/隐藏侧栏" @click="sidebarOpen = !sidebarOpen">☰</button>
+    <button v-if="canLogout" class="btn-logout" title="退出登录" @click="logout">退出</button>
     <div class="layout">
       <AppSidebar :open="sidebarOpen" :assistant-mode="assistantMode" />
       <ChatPanel

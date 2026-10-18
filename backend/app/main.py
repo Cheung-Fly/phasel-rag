@@ -188,7 +188,8 @@ class AskRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    # password 模式只需要口令；session 模式仍要求用户名（在路由里校验）。
+    username: str = Field(default="", max_length=64, pattern=r"^[A-Za-z0-9_.-]*$")
     password: str = Field(min_length=1, max_length=1024)
 
 
@@ -296,6 +297,11 @@ def _get_auth_store():
     except Exception as exc:
         logger.error("Authentication store unavailable: %s", type(exc).__name__)
         raise HTTPException(503, "身份认证或凭证存储暂不可用") from exc
+
+
+def _single_owner() -> bool:
+    """local 与 password 都是「只有一个主人」的部署形态。"""
+    return _auth_mode() in {"local", "password"}
 
 
 def _auth_mode() -> str:
@@ -855,6 +861,7 @@ def health() -> dict:
         "ingest_max_chunks": s.ingest_max_chunks,
         # 任务队列后端 + 执行器存活情况（2026-10-14 阶段 B）
         "task_queue": _task_queue_health(),
+        "auth_mode": s.auth_mode,
         "knowledge_tab_label": (os.getenv("KNOWLEDGE_TAB_LABEL", "了解学校").strip()[:12] or "了解学校"),
         "assistant_tab_label": (os.getenv("ASSISTANT_TAB_LABEL", "个人助手").strip()[:12] or "个人助手"),
     }
@@ -874,7 +881,13 @@ def close_persistence_pools() -> None:
 @app.on_event("startup")
 def initialize_owner_scoping() -> None:
     get_auth_store()
-    if _auth_mode() == "local":
+    if _auth_mode() == "password":
+        owner = _local_owner()
+        if _get_auth_store().sync_access_password(
+            owner.username, get_settings().access_password
+        ):
+            logger.info("访问口令已更新，旧登录会话已失效")
+    if _single_owner():
         # 启动期就把本地身份解析并落库，而不是等第一个请求。
         # 理由：LOCAL_OWNER_USERNAME 写错、或库不可用，都属于「配置事故」，
         # 应该在启动日志里立刻可见；拖到用户第一次提问才报 503，
@@ -882,7 +895,8 @@ def initialize_owner_scoping() -> None:
         owner = _local_owner()
         set_default_model_owner(owner.user_id)
         logger.info(
-            "认证模式 local（免登录）：本机主人身份 = %s (user_id=%s)",
+            "认证模式 %s：主人身份 = %s (user_id=%s)",
+            _auth_mode(),
             owner.username,
             owner.user_id,
         )
@@ -903,7 +917,7 @@ def initialize_owner_scoping() -> None:
         )
     else:
         logger.info("站点注册表已就绪（PostgreSQL）")
-        if _auth_mode() == "local":
+        if _single_owner():
             # 升级不改变行为：把改造前的硬编码站点播种给本机主人（幂等，不覆盖改动）。
             # ★ 只在 local 模式播种。多用户部署从空注册表起步 —— 内置站点是
             #   「本项目单用户形态」的行为快照，不该强加给别人的部署；那边由用户在
@@ -952,8 +966,14 @@ def login(req: LoginRequest, request: Request, response: Response) -> dict:
     if _auth_mode() == "local":
         raise HTTPException(404, "单用户本地模式未启用账号登录")
     store = _get_auth_store()
+    if _auth_mode() == "password":
+        username = get_settings().local_owner_username
+    elif len(req.username) < 3:
+        raise HTTPException(422, "请输入用户名")
+    else:
+        username = req.username
     client_host = request.client.host if request.client else "unknown"
-    attempt_key = login_attempt_key(req.username, client_host)
+    attempt_key = login_attempt_key(username, client_host)
     try:
         if store.is_rate_limited(attempt_key):
             raise HTTPException(
@@ -961,7 +981,7 @@ def login(req: LoginRequest, request: Request, response: Response) -> dict:
                 "登录尝试次数过多，请稍后再试",
                 headers={"Retry-After": str(rate_limit_retry_after())},
             )
-        user_id = store.authenticate(req.username, req.password, attempt_key)
+        user_id = store.authenticate(username, req.password, attempt_key)
     except HTTPException:
         raise
     except Exception as exc:
@@ -2012,7 +2032,7 @@ def delete_document(
         # 本机单人模式下 "shared" 就是这台机器主人自己上传的资料，必须可删
         # （否则公共知识库的文档在 UI 上永远删不掉）。
         # 多用户（session）模式保持原语义：shared 文档不可由普通用户删除。
-        allow_shared=_auth_mode() == "local",
+        allow_shared=_single_owner(),
     )
     if deleted == 0:
         raise HTTPException(404, "未找到该文档")

@@ -25,7 +25,9 @@ async function asJson(resp) {
     } catch {
       detail = await resp.text().catch(() => '');
     }
-    throw new Error(detail || `HTTP ${resp.status} ${resp.statusText}`);
+    const err = new Error(detail || `HTTP ${resp.status} ${resp.statusText}`);
+    err.status = resp.status;
+    throw err;
   }
   return resp.json();
 }
@@ -56,6 +58,10 @@ export const api = {
   // 保留 authMe 是因为它的 user_id 被用作 localStorage 的命名空间，
   // 见 App.vue 的 bootstrap() 与 lib/storage.js 的 setUserScope。
   authMe: () => json('/api/auth/me'),
+  // password 模式（远程访问自己的服务器）才会用到；local 模式后端返回 404。
+  authLogin: (password) =>
+    json('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) }),
+  authLogout: () => json('/api/auth/logout', { method: 'POST' }),
 
   /* ---------- 隔离浏览器人工验证 ---------- */
   browserSession: () => json('/api/browser-session'),

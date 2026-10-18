@@ -275,6 +275,28 @@ class AuthStore:
             raise RuntimeError("local owner row is missing after upsert")
         return AuthenticatedUser(*row)
 
+    def sync_access_password(self, username: str, password: str) -> bool:
+        """让该用户的口令哈希与 ACCESS_PASSWORD 一致；口令变了就撤销旧会话。
+
+        返回口令是否发生了变化。口令没变时不重写哈希，避免每次启动都踢掉会话。
+        """
+        normalized = _normalize_username(username)
+        with self._pool.connection() as connection:
+            row = connection.execute(
+                "SELECT user_id, password_hash FROM app_users WHERE username = %s",
+                (normalized,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("access owner row is missing")
+            if _verify_password(password, row[1]):
+                return False
+            connection.execute(
+                "UPDATE app_users SET password_hash = %s WHERE user_id = %s",
+                (_hash_password(password), row[0]),
+            )
+            connection.execute("DELETE FROM app_auth_sessions WHERE user_id = %s", (row[0],))
+        return True
+
     def authenticate(self, username: str, password: str, client_key: str) -> str | None:
         normalized = _normalize_username(username)
         with self._pool.connection() as connection:

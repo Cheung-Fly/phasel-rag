@@ -135,6 +135,7 @@ class Settings(BaseSettings):
     # ---------- 认证模式（2026-10-14 新增：单用户本地模式）----------
     # session = 需要账号密码登录，多用户互相隔离（原行为）
     # local   = 免登录：任何请求都直接归属到 local_owner_username 这一个身份
+    # password= 单用户 + 访问口令（ACCESS_PASSWORD），用于远程访问自己的服务器
     #
     # ★ 为什么默认仍是 session（安全默认）：
     #   默认值会在「忘了配 .env」这种最常见的部署事故里生效。若默认 local，
@@ -149,14 +150,25 @@ class Settings(BaseSettings):
     #   该身份不存在时会被自动创建（口令为随机值，本地模式不使用口令登录）。
     local_owner_username: str = "admin"
 
+    # password 模式：单用户 + 一个访问口令。适合部署在自己的服务器上、
+    # 通过地址远程打开网页：身份仍是 local_owner_username，但必须先用口令登录。
+    # 口令只在这里配置，启动时同步成该身份的口令哈希；改口令后旧会话全部失效。
+    access_password: str = ""
+
+    @model_validator(mode="after")
+    def _require_access_password(self):
+        if self.auth_mode == "password" and not 12 <= len(self.access_password) <= 1024:
+            raise ValueError("AUTH_MODE=password 需要 12 位以上的 ACCESS_PASSWORD")
+        return self
+
     @field_validator("auth_mode")
     @classmethod
     def _validate_auth_mode(cls, value: str) -> str:
         # 不做静默回退：写错值时若悄悄按 session 处理，现象是「明明配了 local
         # 却还在要登录」，排查成本远高于启动即报错。
         normalized = value.strip().lower()
-        if normalized not in {"session", "local"}:
-            raise ValueError("AUTH_MODE 只能是 session 或 local")
+        if normalized not in {"session", "local", "password"}:
+            raise ValueError("AUTH_MODE 只能是 session、local 或 password")
         return normalized
 
     @model_validator(mode="after")

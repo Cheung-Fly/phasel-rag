@@ -36,6 +36,11 @@ if [ "${AUTH_MODE:-session}" = "local" ]; then
     ok "AUTH_MODE=local，且端口仅绑定 127.0.0.1"
   fi
   warn "local 模式没有登录：不要把服务直接暴露到公网；远程使用请走 SSH 隧道或带认证的反向代理"
+elif [ "${AUTH_MODE:-}" = "password" ]; then
+  [ "${#ACCESS_PASSWORD}" -ge 12 ] && ok "ACCESS_PASSWORD 长度满足要求" \
+    || bad "AUTH_MODE=password 需要 12 位以上的 ACCESS_PASSWORD"
+  [ "${AUTH_COOKIE_SECURE:-false}" = "true" ] && ok "AUTH_COOKIE_SECURE=true" \
+    || warn "远程访问应经 HTTPS 并设置 AUTH_COOKIE_SECURE=true，否则口令明文传输"
 else
   [ "${AUTH_COOKIE_SECURE:-false}" = "true" ] && ok "AUTH_COOKIE_SECURE=true" \
     || warn "session 模式经 HTTPS 访问时应设置 AUTH_COOKIE_SECURE=true"

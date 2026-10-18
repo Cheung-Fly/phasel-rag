@@ -11,6 +11,9 @@
 # 分类器源码（shell_exec.py）从 backend/app 复制进本镜像，与 api 侧共用
 # 同一份逻辑，但运行时物理独立（第二道防线）。
 
+# Node 来自官方镜像，仅用于 `npx skills`（命令分类器只放行这一个包）。
+FROM node:22-bookworm-slim AS node
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -23,6 +26,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       coreutils procps findutils tar unzip ca-certificates \
       fonts-noto-cjk && \
     rm -rf /var/lib/apt/lists/*
+
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+# 容器以任意 uid 运行，HOME 与 npm 缓存放到可写的 /tmp。
+ENV HOME=/tmp/home npm_config_cache=/tmp/npm-cache npm_config_update_notifier=false
 
 WORKDIR /shell
 COPY shell/requirements.txt .

@@ -35,6 +35,7 @@ import analysis_exec  # 与本模块同目录，构建时 COPY 进来（数据�
 
 WORK_DIR = shell_exec.WORK_DIR
 EXEC_TIMEOUT_SECONDS = 10
+NPX_TIMEOUT_SECONDS = 120  # npx 首次要下载包，10 秒不够
 ANALYSIS_TIMEOUT_SECONDS = 60  # 数据分析脚本可能跑较久（大表/绘图），放宽到 60s
 
 # 数据分析图表回传：脚本里 savefig 的产物扩展名（白名单，避免把数据文件/脚本当图回传）。
@@ -95,7 +96,7 @@ def _run(command: str, *, allow_dangerous: bool) -> dict:
             cwd=WORK_DIR,
             capture_output=True,
             text=True,
-            timeout=EXEC_TIMEOUT_SECONDS,
+            timeout=NPX_TIMEOUT_SECONDS if argv[0] == "npx" else EXEC_TIMEOUT_SECONDS,
             start_new_session=True,  # 独立进程组，便于杀整棵树
         )
     except subprocess.TimeoutExpired as exc:

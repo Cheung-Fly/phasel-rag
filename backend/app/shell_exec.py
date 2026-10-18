@@ -33,6 +33,13 @@ READONLY_COMMANDS = {
 # 写命令：走审批闸门。
 DANGEROUS_COMMANDS = {"mkdir", "touch", "cp", "mv", "tar", "unzip"}
 
+# npx 只允许运行官方 skills CLI（`npx [-y] skills <子命令> ...`），其它包一律拒绝。
+# find/search 只查询，直接执行；其余子命令会写文件，走审批。
+NPX_PACKAGE = "skills"
+NPX_READONLY_SUBCOMMANDS = {"find", "search"}
+NPX_WRITE_SUBCOMMANDS = {"add", "install", "update", "remove", "init", "list", "ls"}
+_NPX_ARG_RE = re.compile(r"^[A-Za-z0-9_@./:=+ -]{1,200}$")
+
 # 永久拒绝：连审批都不给。破坏性 / 逃逸 / 能触碰容器边界。
 FORBIDDEN_COMMANDS = {
     "rm", "dd", "mkfs", "shutdown", "reboot", "docker", "kubectl", "ssh",
@@ -131,6 +138,22 @@ def classify(command: str) -> str:
         return "forbidden"
 
 
+def _classify_npx(argv: list[str]) -> tuple[str, str]:
+    rest = argv[1:]
+    while rest and rest[0] in {"-y", "--yes"}:
+        rest = rest[1:]
+    if not rest or rest[0] != NPX_PACKAGE:
+        raise _Forbidden(f"npx 只允许运行 {NPX_PACKAGE}")
+    if len(rest) < 2 or rest[1] not in NPX_READONLY_SUBCOMMANDS | NPX_WRITE_SUBCOMMANDS:
+        raise _Forbidden("不支持的 skills 子命令")
+    for token in rest[1:]:
+        if not _NPX_ARG_RE.fullmatch(token) or ".." in token:
+            raise _Forbidden("skills 参数含不允许的字符")
+    if rest[1] in NPX_READONLY_SUBCOMMANDS:
+        return "readonly", "npx skills 查询"
+    return "dangerous", f"npx skills {rest[1]}"
+
+
 def classify_detail(command: str) -> tuple[str, str]:
     """返回 (分类, 附加信息)。
 
@@ -157,6 +180,9 @@ def classify_detail(command: str) -> tuple[str, str]:
     # 2) 永久拒绝。
     if base in FORBIDDEN_COMMANDS:
         raise _Forbidden(f"命令 {base} 被永久禁止")
+
+    if base == "npx":
+        return _classify_npx(argv)
 
     # 3) 写命令 → dangerous。
     if base in DANGEROUS_COMMANDS:

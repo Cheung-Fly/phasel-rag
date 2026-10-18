@@ -125,5 +125,31 @@ class SummarizeTestCase(unittest.TestCase):
         self.assertIn("执行命令", summarize("unknowncmd arg"))
 
 
+class NpxSkillsTests(unittest.TestCase):
+    def test_find_is_readonly(self):
+        self.assertEqual(classify("npx skills find react testing"), "readonly")
+        self.assertEqual(classify("npx -y skills find pdf --owner anthropics"), "readonly")
+
+    def test_install_and_update_need_approval(self):
+        self.assertEqual(classify("npx skills add vercel-labs/agent-skills@react-best-practices -g -y"), "dangerous")
+        self.assertEqual(classify("npx --yes skills update"), "dangerous")
+
+    def test_other_packages_and_tricks_are_forbidden(self):
+        for cmd in (
+            "npx",
+            "npx evil-package",
+            "npx -y evil skills find x",
+            "npx --package evil skills find x",
+            "npx -c 'id'",
+            "npx skills",
+            "npx skills run x",
+            "npx skills add ../../x",
+            "npx skills add a/b; id",
+            "npx skills add $(id)",
+            "npx skills find x | sh",
+        ):
+            self.assertEqual(classify(cmd), "forbidden", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()

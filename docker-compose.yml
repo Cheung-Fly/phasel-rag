@@ -260,8 +260,9 @@ services:
       - no-new-privileges:true
     volumes:
       - ./data/shell-work:/work
-    mem_limit: 128m
-    memswap_limit: 192m
+    # npx 需要更多内存；仍然限制死，防止下载/安装拖垮宿主机。
+    mem_limit: 512m
+    memswap_limit: 768m
     healthcheck:
       test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8767),3); s.close()"]
       interval: 30s

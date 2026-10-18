@@ -1,6 +1,6 @@
 # Shell 执行容器：受限命令执行沙箱。
 #
-# 安全基线（与 browser 容器同构，见 docs/终端执行-方案.md §1/§5）：
+# 安全基线（与 browser 容器同构）：
 #   - 非 root（USER shelluser）
 #   - 无 docker.sock、无宿主端口、无额外 capability
 #   - no-new-privileges（在 compose 里声明）

@@ -65,7 +65,7 @@ class Settings(BaseSettings):
 
     # chat 模型：qwen-plus 质量与成本平衡；省钱可换 qwen-turbo
     # ★ 换供应商时必须同步改这里，否则会把 A 家的模型名发给 B 家端点。
-    #   （首次运行向导会接管这件事，见 docs/Muse化路线图.md 阶段 E.3 #1）
+    #   （后续计划由首次运行向导接管这件事）
     llm_model: str = "qwen-plus"
 
     # embedding 模型与维度

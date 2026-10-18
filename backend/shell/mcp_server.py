@@ -4,7 +4,7 @@
 见 shell/Dockerfile），但**运行时物理独立**：即使 api 被攻破、网络层能直接调
 本容器的 MCP 工具，本侧仍会**再分类校验一遍**才执行。
 
-威胁模型（为什么有两个工具，见 docs/终端执行-方案.md §3/§6.6）：
+威胁模型（为什么有两个工具见下文）：
 - `run_shell` —— 只执行 readonly。这是**第二道防线**：即使 api 侧分类器有 bug
   把 dangerous 误判成 readonly 直接下发，本侧也会拦下（返回 approval_required）。
 - `run_approved_shell` —— 执行 dangerous（但仍拒绝 forbidden）。dangerous 命令的
@@ -14,7 +14,7 @@
   dangerous 放行，但仍对 forbidden（rm/docker/命令拼接）做**最后一道兜底拒绝**——
   永久禁止的命令，连审批通过后也不放行。
 
-执行约束（见 docs/终端执行-方案.md §6.7 / §2）：
+执行约束：
 - 永远 shell=False，shlex.split 拆 argv。
 - 无状态：每条命令独立 subprocess.run(cwd=/work)，不保留跨命令状态。
 - subprocess 执行超时 10 秒，强杀整棵进程树（start_new_session + killpg）。

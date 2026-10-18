@@ -102,6 +102,12 @@ class ExtensionRoutingTests(unittest.TestCase):
             self.assertTrue(main._requests_extension("/skill system-check 看看磁盘", "u"))
             self.assertFalse(main._requests_extension("今天食堂几点开门", "u"))
             self.assertFalse(main._requests_extension("github", None))
+        only_skill = {"skills": [{"name": "find-skills"}], "mcp_servers": []}
+        with patch.object(main, "extension_snapshot", return_value=only_skill):
+            self.assertFalse(main._requests_extension("用 find-skills 找 agent-browser", "u"))
+        with patch.object(main, "load_skills", return_value=[{"name": "find-skills", "content": "# x"}]):
+            self.assertIn("find-skills", main._named_skills("用 find-skills 找 agent-browser"))
+            self.assertEqual(main._named_skills("今天天气"), "")
 
 
 class RealStdioServerTests(unittest.TestCase):

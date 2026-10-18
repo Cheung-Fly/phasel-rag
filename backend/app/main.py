@@ -44,7 +44,7 @@ from starlette.concurrency import run_in_threadpool
 
 from . import rag
 from .browser_agent import answer_browser_task
-from .shell_agent import answer_shell_task, intends_shell as _intends_shell
+from .shell_agent import answer_shell_task, intends_shell as _llm_intends_shell
 from .analysis_agent import answer_analysis_task, intends_analysis as _intends_analysis
 from .extension_agent import answer_extension_task
 from .extensions import (
@@ -414,9 +414,25 @@ def _requests_extension(question: str, owner_user_id: str | None = None) -> bool
         snapshot = extension_snapshot(owner_user_id)
     except Exception:
         return False
-    names = [item["name"] for item in snapshot["skills"]]
-    names += [item["name"] for item in snapshot["mcp_servers"] if item["enabled"]]
+    mcp_names = [item["name"] for item in snapshot["mcp_servers"] if item["enabled"]]
+    # 没有任何启用的 MCP 时，扩展 Agent 没有工具可用，Skill 点名交给终端 Agent（见 _named_skills）。
+    names = mcp_names + ([item["name"] for item in snapshot["skills"]] if mcp_names else [])
     return any(len(name) >= 2 and name.casefold() in value for name in names)
+
+
+def _named_skills(question: str) -> str:
+    """问题里点名的 Skill 内容（给终端 Agent 当操作指引）；没有则为空串。"""
+    value = question.casefold()
+    parts = [
+        f"## Skill: {skill['name']}\n{skill['content']}"
+        for skill in load_skills()
+        if len(skill["name"]) >= 2 and skill["name"].casefold() in value
+    ]
+    return "\n\n".join(parts)
+
+
+def _intends_shell(question: str) -> bool:
+    return bool(_named_skills(question)) or _llm_intends_shell(question)
 
 
 # ★ 这里曾经有 _requested_open_target / _requested_browser_task 两张关键词表，
@@ -713,7 +729,9 @@ def _answer_shell_task(
 
         return _json.dumps(result, ensure_ascii=False)
 
-    task = answer_shell_task(question, user.user_id, call_for_user)
+    task = answer_shell_task(
+        question, user.user_id, call_for_user, skill_context=_named_skills(question)
+    )
     task["shell_approval"] = None
 
     pending = task.pop("pending_shell", None) or {}

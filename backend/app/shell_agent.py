@@ -123,6 +123,7 @@ def answer_shell_task(
     question: str,
     owner_user_id: str,
     call_shell_tool,
+    skill_context: str = "",
 ) -> dict:
     """跑一次 shell 任务，返回 {"answer": str, "pending_shell": dict | None}。
 
@@ -143,7 +144,15 @@ def answer_shell_task(
 
     model = get_chat_model(temperature=0).bind_tools(_TOOLS)
     messages = [
-        SystemMessage(content=_SYSTEM_PROMPT),
+        SystemMessage(
+            content=_SYSTEM_PROMPT
+            + (
+                "\n\n用户点名了下面的 Skill，按其中的指引完成任务（仍只能通过 run_shell 执行命令）：\n"
+                + skill_context
+                if skill_context
+                else ""
+            )
+        ),
         HumanMessage(content=f"用户请求：\n{question}"),
     ]
     tool_calls_seen = 0

@@ -1524,6 +1524,7 @@ async def _execute_mcp_approval(
             detail["tool_name"],
             detail.get("arguments") or {},
             user.user_id,
+            approved=True,
         )
         store.complete_execution(
             user.user_id,

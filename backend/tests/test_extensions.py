@@ -101,5 +101,37 @@ class ExtensionRoutingTests(unittest.TestCase):
             self.assertFalse(main._requests_extension("github", None))
 
 
+class RealStdioServerTests(unittest.TestCase):
+    SERVER = (
+        "from mcp.server.fastmcp import FastMCP\n"
+        "m = FastMCP('demo')\n"
+        "@m.tool()\n"
+        "def delete_item(item_id: int) -> str:\n"
+        "    'Delete an item'\n"
+        "    return f'deleted {item_id}'\n"
+        "m.run()\n"
+    )
+
+    def test_mutating_tool_runs_only_when_approved(self):
+        import asyncio
+        import sys
+
+        with tempfile.TemporaryDirectory() as root:
+            script = Path(root) / "srv.py"
+            script.write_text(self.SERVER, encoding="utf-8")
+            config = {"demo": {
+                "enabled": True, "transport": "stdio",
+                "command": sys.executable, "args": [str(script)],
+            }}
+            with patch.dict(os.environ, {"MCP_SERVERS_JSON": json.dumps(config)}):
+                manager = extensions.ExtensionManager()
+                with self.assertRaises(Exception):
+                    asyncio.run(manager.call("mcp__demo__delete_item", {"item_id": 1}, None))
+                result = asyncio.run(
+                    manager.call("mcp__demo__delete_item", {"item_id": 1}, None, approved=True)
+                )
+        self.assertEqual(result, "deleted 1")
+
+
 if __name__ == "__main__":
     unittest.main()

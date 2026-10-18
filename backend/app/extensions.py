@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from mcp import ClientSession
@@ -108,6 +109,7 @@ def _is_read_only(name: str, description: str) -> bool:
 
 
 class ExtensionManager:
+    @asynccontextmanager
     async def _session(self, config: dict):
         transport = config.get("transport", "streamable_http")
         if transport == "streamable_http":
@@ -155,7 +157,7 @@ class ExtensionManager:
 
     async def _discover(self, server_name: str, config: dict) -> list[dict]:
         found = []
-        async for session in self._session(config):
+        async with self._session(config) as session:
             tools = await session.list_tools()
             for tool in tools.tools:
                 found.append({
@@ -168,7 +170,11 @@ class ExtensionManager:
         return found
 
     async def call(
-        self, qualified_name: str, arguments: dict, owner_user_id: str | None = None
+        self,
+        qualified_name: str,
+        arguments: dict,
+        owner_user_id: str | None = None,
+        approved: bool = False,
     ) -> str:
         parts = qualified_name.split("__", 2)
         server_name = parts[1] if len(parts) == 3 else ""
@@ -177,7 +183,7 @@ class ExtensionManager:
             raise RuntimeError("MCP 服务暂时熔断，请稍后重试")
         try:
             text = await asyncio.wait_for(
-                self._call(qualified_name, arguments, owner_user_id), MCP_TIMEOUT_SECONDS
+                self._call(qualified_name, arguments, owner_user_id, approved), MCP_TIMEOUT_SECONDS
             )
         except Exception as exc:
             breaker.failure()
@@ -188,7 +194,11 @@ class ExtensionManager:
         return text
 
     async def _call(
-        self, qualified_name: str, arguments: dict, owner_user_id: str | None = None
+        self,
+        qualified_name: str,
+        arguments: dict,
+        owner_user_id: str | None = None,
+        approved: bool = False,
     ) -> str:
         parts = qualified_name.split("__", 2)
         if len(parts) != 3 or parts[0] != "mcp":
@@ -197,19 +207,18 @@ class ExtensionManager:
         config = _server_config(owner_user_id).get(server_name)
         if not isinstance(config, dict) or config.get("enabled") is not True:
             raise RuntimeError("MCP 服务未启用")
-        async for session in self._session(config):
+        async with self._session(config) as session:
             tools = await session.list_tools()
             tool = next((item for item in tools.tools if item.name == tool_name), None)
             if tool is None:
                 raise RuntimeError("MCP 工具不存在")
-            if not _is_read_only(tool.name, tool.description or ""):
+            if not approved and not _is_read_only(tool.name, tool.description or ""):
                 raise RuntimeError("该 MCP 工具可能改变状态，当前版本需要审批")
             result = await session.call_tool(tool_name, arguments=arguments)
             text = "\n".join(
                 item.text for item in result.content if hasattr(item, "text")
             )
             return text[:MAX_TOOL_OUTPUT_CHARS]
-        raise RuntimeError("MCP 服务连接失败")
 
 
 def extension_snapshot(owner_user_id: str | None = None) -> dict:

@@ -233,7 +233,7 @@ window.addEventListener('resize', onViewportResize);
     class="handoff-reopen"
     @click="active = true"
   >
-    显示校园网页
+    显示网页
   </button>
   <div
     v-if="active"
@@ -263,7 +263,7 @@ window.addEventListener('resize', onViewportResize);
       :class="{ 'handoff-panel-docked': status === 'login_confirmed' }"
       :style="status === 'login_confirmed' ? { width: `${panelWidth}px` } : undefined"
       tabindex="0"
-      :aria-label="status === 'login_confirmed' ? '校园网站浏览器面板' : '校园网站人工验证窗口'"
+      :aria-label="status === 'login_confirmed' ? '网站浏览器面板' : '网站人工验证窗口'"
       @keydown="onKeydown"
     >
       <header>
@@ -271,7 +271,7 @@ window.addEventListener('resize', onViewportResize);
           <!-- ★ 这里原本写死「东软智慧教育平台」。阶段 C 起站点由用户登记，
                再写死一个具体名字就会在别的站点上显示错误信息。站点的真实
                名称由上面那条聊天消息给出（它由站点规格生成），这里保持中性。 -->
-          <strong>校园网站{{ status === 'login_confirmed' ? ' · 已登录' : ' · 人工验证' }}</strong>
+          <strong>网站{{ status === 'login_confirmed' ? ' · 已登录' : ' · 人工验证' }}</strong>
           <p>
             {{ status === 'login_confirmed'
               ? '浏览器会话保持开启；可拖动左侧边缘调整面板宽度。'

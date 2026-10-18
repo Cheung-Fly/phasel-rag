@@ -208,7 +208,7 @@ class CredentialRequest(BaseModel):
         try:
             port = parsed.port
         except ValueError as exc:
-            raise ValueError("校园网站地址格式不正确") from exc
+            raise ValueError("网站地址格式不正确") from exc
         if (
             parsed.scheme != "https"
             or not parsed.hostname
@@ -218,14 +218,14 @@ class CredentialRequest(BaseModel):
             or parsed.query
             or parsed.fragment
         ):
-            raise ValueError("校园网站地址必须是无凭据、无查询参数的 HTTPS 地址")
+            raise ValueError("网站地址必须是无凭据、无查询参数的 HTTPS 地址")
         try:
             address = ipaddress.ip_address(parsed.hostname)
         except ValueError:
             pass
         else:
             if not address.is_global:
-                raise ValueError("校园网站地址不能指向非公网 IP")
+                raise ValueError("网站地址不能指向非公网 IP")
         return value.strip()
 
 
@@ -943,7 +943,7 @@ def initialize_owner_scoping() -> None:
     rag.migrate_legacy_documents_to_shared()
 
 
-# ---------------------------------------------------------------- 个人助手登录与校园凭证库
+# ---------------------------------------------------------------- 个人助手登录与个人凭证库
 @app.post("/api/auth/login", tags=["个人凭证"], summary="登录个人助手")
 def login(req: LoginRequest, request: Request, response: Response) -> dict:
     # 本地模式直接关掉登录入口。不能只是「前端不再调用」就完事：
@@ -1013,7 +1013,7 @@ def auth_me(user: AuthenticatedUser = Depends(_current_user)) -> dict:
     }
 
 
-@app.get("/api/credentials", tags=["个人凭证"], summary="列出校园系统账号标签")
+@app.get("/api/credentials", tags=["个人凭证"], summary="列出网站账号标签")
 def credentials(user: AuthenticatedUser = Depends(_current_user)) -> dict:
     try:
         return {"credentials": _get_auth_store().list_credentials(user.user_id)}
@@ -1024,13 +1024,13 @@ def credentials(user: AuthenticatedUser = Depends(_current_user)) -> dict:
         raise HTTPException(503, "凭证库暂不可用") from exc
 
 
-@app.post("/api/credentials", tags=["个人凭证"], summary="保存校园系统账号")
+@app.post("/api/credentials", tags=["个人凭证"], summary="保存网站账号")
 def create_credential(
     req: CredentialRequest,
     user: AuthenticatedUser = Depends(_current_user),
 ) -> dict:
     if not req.service_key.strip() or not req.label.strip():
-        raise HTTPException(422, "校园系统标识和自定义标签不能为空")
+        raise HTTPException(422, "站点标识和自定义标签不能为空")
     try:
         credential_id = _get_auth_store().save_credential(
             owner_user_id=user.user_id,
@@ -1045,7 +1045,7 @@ def create_credential(
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     except LookupError as exc:
-        raise HTTPException(404, "未找到该校园账号") from exc
+        raise HTTPException(404, "未找到该账号") from exc
     except HTTPException:
         raise
     except Exception as exc:
@@ -1057,7 +1057,7 @@ def create_credential(
 @app.get(
     "/api/credentials/{credential_id}",
     tags=["个人凭证"],
-    summary="精确读取单项校园账号（口令已脱敏）",
+    summary="精确读取单项账号（口令已脱敏）",
 )
 def get_credential(
     credential_id: str,
@@ -1077,7 +1077,7 @@ def get_credential(
         logger.error("Credential read failed: %s", type(exc).__name__)
         raise HTTPException(503, "凭证无法解密；请检查加密密钥") from exc
     if credential is None:
-        raise HTTPException(404, "未找到该校园账号")
+        raise HTTPException(404, "未找到该账号")
     return credential
 
 
@@ -1110,7 +1110,7 @@ def reveal_credential(
         logger.error("Credential reveal failed: %s", type(exc).__name__)
         raise HTTPException(503, "凭证无法解密；请检查加密密钥") from exc
     if credential is None:
-        raise HTTPException(404, "未找到该校园账号")
+        raise HTTPException(404, "未找到该账号")
     return credential
 
 
@@ -1165,7 +1165,7 @@ async def browser_session_action(
     return {"status": result}
 
 
-@app.post("/api/browser-session/complete", tags=["个人凭证"], summary="确认校园网站登录状态")
+@app.post("/api/browser-session/complete", tags=["个人凭证"], summary="确认网站登录状态")
 async def complete_browser_verification(
     user: AuthenticatedUser = Depends(_current_user),
 ) -> dict:
@@ -1193,7 +1193,7 @@ async def close_browser_session(
 @app.put(
     "/api/credentials/{credential_id}",
     tags=["个人凭证"],
-    summary="更新校园系统账号",
+    summary="更新网站账号",
 )
 def update_credential(
     credential_id: str,
@@ -1201,7 +1201,7 @@ def update_credential(
     user: AuthenticatedUser = Depends(_current_user),
 ) -> dict:
     if not req.service_key.strip() or not req.label.strip():
-        raise HTTPException(422, "校园系统标识和自定义标签不能为空")
+        raise HTTPException(422, "站点标识和自定义标签不能为空")
     try:
         updated_id = _get_auth_store().save_credential(
             owner_user_id=user.user_id,
@@ -1217,7 +1217,7 @@ def update_credential(
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     except LookupError as exc:
-        raise HTTPException(404, "未找到该校园账号") from exc
+        raise HTTPException(404, "未找到该账号") from exc
     except HTTPException:
         raise
     except Exception as exc:
@@ -1229,7 +1229,7 @@ def update_credential(
 @app.delete(
     "/api/credentials/{credential_id}",
     tags=["个人凭证"],
-    summary="删除校园系统账号",
+    summary="删除网站账号",
 )
 def delete_credential(
     credential_id: str,
@@ -1243,7 +1243,7 @@ def delete_credential(
         logger.error("Credential deletion failed: %s", type(exc).__name__)
         raise HTTPException(503, "凭证库暂不可用") from exc
     if not deleted:
-        raise HTTPException(404, "未找到该校园账号")
+        raise HTTPException(404, "未找到该账号")
     return {"deleted": True}
 
 

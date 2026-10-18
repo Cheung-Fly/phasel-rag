@@ -45,6 +45,8 @@ const outcome = computed(() => props.approval.outcome || '');
    执行后回显统计结论（stdout），与终端执行同构。 */
 const isShell = computed(() => props.approval.action === 'run_shell');
 const isAnalysis = computed(() => props.approval.action === 'data_analysis');
+const isMcp = computed(() => props.approval.action === 'mcp_tool');
+const isOutputAction = computed(() => isShell.value || isAnalysis.value || isMcp.value);
 
 /** 后端生成的「人话翻译」：用户不用懂 shell 也能判断这条命令在做什么。 */
 const shellSummary = computed(() => {
@@ -126,11 +128,12 @@ async function approveAndExecute() {
     const result = await api.executeApproval(props.approval.approval_id);
     running.value = false;
     if (result.status === 'executed') {
-      if (isShell.value || isAnalysis.value) {
+      if (isOutputAction.value) {
         // ★ 终端命令 / 数据分析脚本执行成功：把 stdout/exit_code 写回审批对象，
         //   让卡片立即回显「命令/脚本输出了什么」。这正是 Q5「结果回显在卡片自身」的落点。
         const detail = { ...(props.approval.detail || {}) };
         if (result.stdout !== undefined) detail.stdout = result.stdout;
+        if (isMcp.value && typeof result.result === 'string') detail.stdout = result.result;
         if (result.exit_code !== undefined) detail.exit_code = result.exit_code;
         // ★ 数据分析图表回传：把本次生成的图表文件名写回 detail.artifacts，
         //   卡片据此渲染 <img>，让用户真正「看到」分析出的图（闭环的最后一环）。
@@ -157,7 +160,7 @@ async function approveAndExecute() {
     } else if (result.status === 'failed') {
       // 终端命令/分析脚本执行失败：后端把原因放在 reason 里（forbidden/timeout/...），
       // 如实告诉用户这条命令为什么没成。
-      settle('failed', (isShell.value || isAnalysis.value)
+      settle('failed', isOutputAction.value
         ? `命令未能执行${result.reason ? `（${result.reason}）` : ''}。`
         : '页面控件已变化或点击失败，未能确认结果；请到网站上核对。');
     } else {
@@ -189,7 +192,7 @@ async function reject() {
   <div class="msg-approval" :class="`approval-${outcome || 'pending'}`">
     <div class="approval-head">
       <span class="approval-label">
-        {{ isAnalysis ? '等待批准的一次数据分析' : (isShell ? '等待批准的一条终端命令' : '等待批准的一次点击') }}
+        {{ isMcp ? '等待批准的一次外部工具调用' : isAnalysis ? '等待批准的一次数据分析' : (isShell ? '等待批准的一条终端命令' : '等待批准的一次点击') }}
       </span>
       <span v-if="!settled && remaining !== null" class="approval-timer">
         {{ remaining }} 秒后自动放弃
@@ -197,7 +200,7 @@ async function reject() {
     </div>
 
     <!-- 终端命令：命令文本 + 后端生成的人话翻译（用户不用懂 shell 也能判断） -->
-    <template v-if="isShell">
+    <template v-if="isShell || isMcp">
       <p class="approval-target"><code class="approval-cmd">{{ approval.target }}</code></p>
       <p v-if="shellSummary" class="approval-summary">{{ shellSummary }}</p>
     </template>
@@ -214,9 +217,9 @@ async function reject() {
     <p v-if="settled" class="approval-result">{{ approval.message }}</p>
 
     <!-- 终端命令 / 分析脚本执行成功后，回显 stdout/exit_code（Q5：结果回显在卡片自身） -->
-    <div v-if="settled && (isShell || isAnalysis) && outcome === 'executed' && (shellStdout || shellExitCode !== null)" class="approval-output">
+    <div v-if="settled && isOutputAction && outcome === 'executed' && (shellStdout || shellExitCode !== null)" class="approval-output">
       <div class="approval-output-head">
-        <span>{{ isAnalysis ? '分析结果' : '命令输出' }}</span>
+        <span>{{ isAnalysis ? '分析结果' : isMcp ? '工具返回' : '命令输出' }}</span>
         <span v-if="shellExitCode !== null" class="approval-exit" :class="shellExitCode === 0 ? 'ok' : 'err'">
           退出码 {{ shellExitCode }}
         </span>

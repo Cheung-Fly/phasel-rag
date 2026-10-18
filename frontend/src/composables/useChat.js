@@ -187,6 +187,11 @@ export function useChat() {
               bot.pendingApproval = ev.approval || null;
               break;
 
+            case 'mcp_approval':
+              // MCP 变更类工具审批：同一张卡片，批准后回显工具返回内容。
+              bot.pendingApproval = ev.approval || null;
+              break;
+
             case 'token':
               if (tFirst === null) tFirst = performance.now();
               chunks++;

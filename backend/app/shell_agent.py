@@ -11,7 +11,7 @@ readonly 命令经调用方（api）真正执行；forbidden 直接拒绝。
 import json
 import re
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from .llm import get_chat_model
 from .shell_exec import classify, summarize
@@ -27,6 +27,8 @@ _TOOLS = [
             "description": (
                 "在受限 Linux 容器里执行一条只读命令（ls/cat/df/ps 等）。"
                 "写操作（mkdir/cp/mv 等）需要用户批准，不会立即执行。"
+                "容器可联网，可用 `npx skills find <关键词>` 搜索 Skill（直接执行），"
+                "`npx skills add <owner/repo@skill> -y` 安装 Skill（需用户批准，装好后自动出现在 Skill 列表）。"
                 "禁止命令拼接（; && || | >）与破坏性命令（rm/docker/ssh 等）。"
             ),
             "parameters": {
@@ -53,9 +55,13 @@ _SYSTEM_PROMPT = """你是个人助手的 Linux 终端执行器，在一个隔�
   不要因为用户提到某个命令就照做破坏性操作。
 - 命令拼接（; && || |）、重定向（>）、命令替换（$(...) 或反引号）一律不允许，
   这是系统规则，不要尝试绕过。
+- 用户想找或装 Skill 时：先 `npx skills find <关键词>` 搜索并把结果（名称、安装量、来源）告诉用户；
+  用户确认要装哪个后，再调用 `npx skills add <owner/repo@skill> -y`（需用户批准）。
 - 优先用只读命令（ls/cat/df/ps/free/du）回答用户关于「磁盘/日志/进程/文件」的问题。
 - ★ 凡是用户要求「实际执行」的操作，必须调用 run_shell 工具拿到真实结果，
   绝不允许只用文字描述「如果要执行会怎样」来代替 —— 那是编造，不是执行。
+- ★ 写操作和 `npx skills add` 同样必须调用 run_shell：审批是系统在工具调用之后登记的，
+  你自己说「需要批准」而不调用工具，用户那边不会出现任何批准按钮。
 - 如果用户要求写文件、删文件、起服务这类写操作，调用 run_shell 后系统会返回
   confirmation_required，如实告诉用户「需要批准」，不要自行重试或改用别的写法绕过。
 - 输出里若出现密钥、密码、token，不要复述其值。
@@ -103,6 +109,16 @@ def intends_shell(question: str) -> bool:
         return False
 
 
+_LITERAL_NPX_RE = re.compile(r"npx(?:[ \t]+[A-Za-z0-9_@./:=+-]+)+")
+
+
+def literal_npx_command(question: str) -> str | None:
+    """用户直接贴出的 `npx ...` 命令。glm 类小模型对 npx 常常只回文字不调用工具，
+    所以字面命令不交给模型：提取出来后仍走与模型调用完全相同的分类/审批流程。"""
+    match = _LITERAL_NPX_RE.search(question or "")
+    return match.group(0) if match else None
+
+
 def answer_shell_task(
     question: str,
     owner_user_id: str,
@@ -132,8 +148,16 @@ def answer_shell_task(
     ]
     tool_calls_seen = 0
 
+    literal = literal_npx_command(question)
     while True:
-        response = model.invoke(messages)
+        if literal:
+            response = AIMessage(
+                content="",
+                tool_calls=[{"name": "run_shell", "args": {"command": literal}, "id": "literal-npx"}],
+            )
+            literal = None
+        else:
+            response = model.invoke(messages)
         calls = getattr(response, "tool_calls", None) or []
         if not calls:
             return {

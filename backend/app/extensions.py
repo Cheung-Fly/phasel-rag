@@ -81,6 +81,29 @@ def save_skill(name: str, content: str) -> None:
     (target / "SKILL.md").write_text(content, encoding="utf-8")
 
 
+def sync_installed_skills(work_dir: Path) -> dict:
+    """把沙箱里 `npx skills add` 装好的 Skill 复制进 SKILLS_DIR。
+
+    只认 <work_dir>/.agents/skills/<name>/SKILL.md 这种普通文件：
+    符号链接一律跳过，名称和长度走与手动添加相同的校验。
+    """
+    result = {"synced": [], "skipped": []}
+    root = work_dir / ".agents" / "skills"
+    if not root.is_dir() or root.is_symlink():
+        return result
+    for entry in sorted(root.iterdir()):
+        skill_file = entry / "SKILL.md"
+        if entry.is_symlink() or not entry.is_dir() or skill_file.is_symlink() or not skill_file.is_file():
+            continue
+        try:
+            save_skill(entry.name, skill_file.read_text(encoding="utf-8"))
+            result["synced"].append(entry.name)
+        except (ValueError, OSError, UnicodeDecodeError) as exc:
+            logger.warning("Skill %s 同步跳过: %s", entry.name, type(exc).__name__)
+            result["skipped"].append(entry.name)
+    return result
+
+
 def delete_skill(name: str) -> bool:
     if not _SKILL_NAME.fullmatch(name):
         return False

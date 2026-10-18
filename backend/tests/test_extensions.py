@@ -98,6 +98,8 @@ class ExtensionRoutingTests(unittest.TestCase):
             self.assertTrue(main._requests_extension("用 system-check 看看磁盘", "u"))
             self.assertTrue(main._requests_extension("帮我查 GitHub 的 issue", "u"))
             self.assertFalse(main._requests_extension("offline 是什么", "u"))
+            self.assertFalse(main._requests_extension("在终端执行 npx skills add a/b@system-check -y", "u"))
+            self.assertTrue(main._requests_extension("/skill system-check 看看磁盘", "u"))
             self.assertFalse(main._requests_extension("今天食堂几点开门", "u"))
             self.assertFalse(main._requests_extension("github", None))
 
@@ -176,3 +178,23 @@ class SkillWriteTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 extensions.save_skill("ok", "  ")
             self.assertFalse(extensions.delete_skill("../etc"))
+
+
+class SkillSyncTests(unittest.TestCase):
+    def test_syncs_real_files_and_skips_symlinks_and_oversize(self):
+        with tempfile.TemporaryDirectory() as skills, tempfile.TemporaryDirectory() as work:
+            base = Path(work) / ".agents" / "skills"
+            (base / "good").mkdir(parents=True)
+            (base / "good" / "SKILL.md").write_text("# good", encoding="utf-8")
+            (base / "big").mkdir()
+            (base / "big" / "SKILL.md").write_text("x" * 13000, encoding="utf-8")
+            (base / "linked").symlink_to(Path(work))
+            with patch.object(extensions, "SKILLS_DIR", Path(skills)):
+                result = extensions.sync_installed_skills(Path(work))
+                self.assertEqual(result["synced"], ["good"])
+                self.assertEqual(result["skipped"], ["big"])
+                self.assertEqual([s["name"] for s in extensions.load_skills()], ["good"])
+
+    def test_no_install_dir_is_noop(self):
+        with tempfile.TemporaryDirectory() as work:
+            self.assertEqual(extensions.sync_installed_skills(Path(work)), {"synced": [], "skipped": []})

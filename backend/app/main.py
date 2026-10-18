@@ -27,6 +27,7 @@ import asyncio
 import base64
 import ipaddress
 import logging
+from pathlib import Path
 import os
 import posixpath
 import threading
@@ -50,6 +51,7 @@ from .extensions import (
     MCP_TIMEOUT_SECONDS,
     ExtensionManager,
     delete_skill,
+    sync_installed_skills,
     extension_snapshot,
     load_skills,
     save_skill,
@@ -403,6 +405,9 @@ def _requests_extension(question: str, owner_user_id: str | None = None) -> bool
     if value.startswith(("/mcp ", "/skill ", "使用 mcp", "使用技能")):
         return True
     if not owner_user_id:
+        return False
+    # 终端命令里出现 Skill 名（如 npx skills add ...@find-skills）是在装/找 Skill，不是调用它。
+    if "npx " in value or "终端" in value:
         return False
     # 自然语言路由：问题里直接点名了已启用的 MCP 服务或 Skill。
     try:
@@ -1430,7 +1435,16 @@ async def _execute_shell_approval(
             user.user_id, approval_id, outcome=STATUS_EXECUTED,
             detail={"command": command, "exit_code": exit_code, "stdout": stdout[:2000]},
         )
-        return {"status": STATUS_EXECUTED, "exit_code": exit_code, "stdout": stdout}
+        response = {"status": STATUS_EXECUTED, "exit_code": exit_code, "stdout": stdout}
+        argv = command.split()
+        if exit_code == 0 and "npx" in argv[:1] and any(a in argv for a in ("add", "install", "update")):
+            try:
+                sync = sync_installed_skills(Path(get_settings().analysis_artifact_dir))
+                response["skills_synced"] = sync["synced"]
+                response["skills_skipped"] = sync["skipped"]
+            except Exception as exc:
+                logger.error("Skill sync failed: %s", type(exc).__name__)
+        return response
     if status == "timeout":
         store.complete_execution(
             user.user_id, approval_id, outcome=STATUS_FAILED,

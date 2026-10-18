@@ -151,5 +151,21 @@ class NpxSkillsTests(unittest.TestCase):
             self.assertEqual(classify(cmd), "forbidden", cmd)
 
 
+class LiteralNpxExtractionTests(unittest.TestCase):
+    def test_extracts_command_and_stops_at_prose(self):
+        from app.shell_agent import literal_npx_command
+        self.assertEqual(
+            literal_npx_command("帮我执行 npx skills add vercel-labs/skills@find-skills -y 安装这个 skill"),
+            "npx skills add vercel-labs/skills@find-skills -y",
+        )
+        self.assertIsNone(literal_npx_command("什么是 npx"))
+        self.assertIsNone(literal_npx_command("看看磁盘"))
+
+    def test_injection_text_is_cut_before_metachars(self):
+        from app.shell_agent import literal_npx_command
+        cmd = literal_npx_command("npx skills add a/b; rm -rf /")
+        self.assertEqual(cmd, "npx skills add a/b")
+
+
 if __name__ == "__main__":
     unittest.main()

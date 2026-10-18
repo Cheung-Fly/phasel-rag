@@ -227,7 +227,7 @@ class Settings(BaseSettings):
     chunk_size: int = 800
     chunk_overlap: int = 120
     retrieval_top_k: int = 4
-    # Initial calibration against backend/evaluation/retrieval_cases.json; re-evaluate
+    # Initial calibration against a campus retrieval case set (since removed); re-evaluate
     # these thresholds when the knowledge base gains new document categories.
     retrieval_candidate_k: int = Field(default=12, ge=1, le=100)
     retrieval_min_relevance: float = Field(default=0.42, ge=0, le=1)

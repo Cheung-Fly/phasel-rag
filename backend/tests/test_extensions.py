@@ -134,5 +134,26 @@ class RealStdioServerTests(unittest.TestCase):
         self.assertEqual(result, "deleted 1")
 
 
+class ServerConfigMergeTests(unittest.TestCase):
+    def test_env_servers_are_kept_and_user_config_overrides_same_name(self):
+        from types import SimpleNamespace
+
+        env = {"a": {"enabled": True, "command": "env-a"}, "b": {"enabled": True, "command": "env-b"}}
+        store = SimpleNamespace(configs=lambda _o: {"b": {"enabled": True, "command": "user-b"}})
+        with patch.dict(os.environ, {"MCP_SERVERS_JSON": json.dumps(env)}), \
+             patch("app.mcp_store.get_mcp_store_or_none", return_value=store):
+            merged = extensions._server_config("u")
+        self.assertEqual(merged["a"]["command"], "env-a")
+        self.assertEqual(merged["b"]["command"], "user-b")
+
+    def test_bad_env_json_does_not_hide_user_servers(self):
+        from types import SimpleNamespace
+
+        store = SimpleNamespace(configs=lambda _o: {"mine": {"enabled": True}})
+        with patch.dict(os.environ, {"MCP_SERVERS_JSON": "{oops"}), \
+             patch("app.mcp_store.get_mcp_store_or_none", return_value=store):
+            self.assertEqual(list(extensions._server_config("u")), ["mine"])
+
+
 if __name__ == "__main__":
     unittest.main()

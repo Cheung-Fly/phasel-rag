@@ -67,13 +67,7 @@ def load_skills() -> list[dict]:
     return skills
 
 
-def _server_config(owner_user_id: str | None = None) -> dict:
-    if owner_user_id:
-        from .mcp_store import get_mcp_store_or_none
-
-        store = get_mcp_store_or_none()
-        if store is not None:
-            return store.configs(owner_user_id)
+def _env_servers() -> dict:
     raw = os.getenv("MCP_SERVERS_JSON", "{}")
     try:
         value = json.loads(raw)
@@ -82,6 +76,22 @@ def _server_config(owner_user_id: str | None = None) -> dict:
     if not isinstance(value, dict):
         raise RuntimeError("MCP_SERVERS_JSON 必须是对象")
     return value
+
+
+def _server_config(owner_user_id: str | None = None) -> dict:
+    # 环境变量是部署者配置的基础服务；用户在界面里保存的同名配置优先。
+    if owner_user_id:
+        from .mcp_store import get_mcp_store_or_none
+
+        store = get_mcp_store_or_none()
+        if store is not None:
+            try:
+                base = _env_servers()
+            except RuntimeError as exc:
+                logger.error("%s，已忽略环境变量中的 MCP 配置", exc)
+                base = {}
+            return {**base, **store.configs(owner_user_id)}
+    return _env_servers()
 
 
 def _tool_schema(server_name: str, tool) -> dict:

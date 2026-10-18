@@ -287,7 +287,7 @@ class Settings(BaseSettings):
 
     # HTTP runtime safeguards. These are process-local by design; use an API
     # gateway or Redis-backed limiter when scaling to multiple API replicas.
-    api_rate_limit: int = Field(default=120, ge=1, le=10_000)
+    api_rate_limit: int = Field(default=600, ge=1, le=10_000)
     api_rate_window_seconds: int = Field(default=60, ge=1, le=3600)
     browser_circuit_failure_threshold: int = Field(default=3, ge=1, le=20)
     browser_circuit_recovery_seconds: int = Field(default=30, ge=1, le=3600)

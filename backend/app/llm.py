@@ -42,6 +42,21 @@ def get_chat_model(temperature: float = 0.2) -> BaseChatModel:
 
     from langchain_openai import ChatOpenAI
 
+    from .model_store import active_profile
+
+    profile = active_profile()
+    if profile:
+        logger.info("LLM = %s @ %s (profile)", profile["model"], _safe_endpoint(profile["base_url"]))
+        return ChatOpenAI(
+            model=profile["model"],
+            base_url=profile["base_url"],
+            api_key=profile["api_key"],
+            temperature=temperature,
+            max_tokens=1024,
+            max_retries=2,
+            timeout=60,
+        )
+
     if s.llm_provider == "local":
         # 阶段三：llama.cpp server 暴露 OpenAI 兼容接口
         logger.info("LLM = local llama.cpp @ %s", s.local_llm_base_url)

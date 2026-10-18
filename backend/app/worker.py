@@ -37,6 +37,7 @@ from pathlib import Path
 
 from . import rag
 from .config import get_settings
+from .model_store import set_default_model_owner
 from .task_store import (
     TaskCancelled,
     close_task_store,
@@ -302,6 +303,8 @@ class Worker:
             executor = EXECUTORS.get(task["task_type"])
             if executor is None:
                 raise RuntimeError(f"未知任务类型 {task['task_type']}")
+            # 后台任务使用任务所属用户启用的模型档案；worker 一次只跑一个任务。
+            set_default_model_owner(task.get("owner_user_id"))
             result = executor(task, ctx)
         except TaskCancelled:
             if ctx.aborted:

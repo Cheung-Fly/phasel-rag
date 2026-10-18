@@ -211,14 +211,19 @@ class ExtensionManager:
             tools = await session.list_tools()
             tool = next((item for item in tools.tools if item.name == tool_name), None)
             if tool is None:
-                raise RuntimeError("MCP 工具不存在")
-            if not approved and not _is_read_only(tool.name, tool.description or ""):
-                raise RuntimeError("该 MCP 工具可能改变状态，当前版本需要审批")
-            result = await session.call_tool(tool_name, arguments=arguments)
-            text = "\n".join(
-                item.text for item in result.content if hasattr(item, "text")
-            )
-            return text[:MAX_TOOL_OUTPUT_CHARS]
+                refusal = "MCP 工具不存在"
+            elif not approved and not _is_read_only(tool.name, tool.description or ""):
+                refusal = "该 MCP 工具可能改变状态，当前版本需要审批"
+            else:
+                refusal = None
+                result = await session.call_tool(tool_name, arguments=arguments)
+                text = "\n".join(
+                    item.text for item in result.content if hasattr(item, "text")
+                )
+        # 在会话关闭后再抛错，避免被 stdio 的 TaskGroup 包成异常组。
+        if refusal:
+            raise RuntimeError(refusal)
+        return text[:MAX_TOOL_OUTPUT_CHARS]
 
 
 def extension_snapshot(owner_user_id: str | None = None) -> dict:

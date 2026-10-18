@@ -125,7 +125,7 @@ class RealStdioServerTests(unittest.TestCase):
             }}
             with patch.dict(os.environ, {"MCP_SERVERS_JSON": json.dumps(config)}):
                 manager = extensions.ExtensionManager()
-                with self.assertRaises(Exception):
+                with self.assertRaisesRegex(RuntimeError, "需要审批"):
                     asyncio.run(manager.call("mcp__demo__delete_item", {"item_id": 1}, None))
                 result = asyncio.run(
                     manager.call("mcp__demo__delete_item", {"item_id": 1}, None, approved=True)

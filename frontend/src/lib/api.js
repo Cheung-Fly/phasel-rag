@@ -209,15 +209,4 @@ export const api = {
 
   deleteHistory: (sessionId, mode = 'school') =>
     json(`/api/chat/${encodeURIComponent(sessionId)}/history?assistant_mode=${encodeURIComponent(mode)}`, { method: 'DELETE' }),
-
-  /* ---------- 主动建议（2026-10-16 阶段 D ②） ---------- */
-  // 「入口触发」：用户打开页面时拉一次，后端若没有待决定的建议会现场推断。
-  // 采纳 → 转后台任务；忽略 → 冷却期内同类建议不再推送。
-  listSuggestions: () => json('/api/suggestions'),
-
-  acceptSuggestion: (id) =>
-    json(`/api/suggestions/${encodeURIComponent(id)}/accept`, { method: 'POST' }),
-
-  dismissSuggestion: (id) =>
-    json(`/api/suggestions/${encodeURIComponent(id)}/dismiss`, { method: 'POST' }),
 };

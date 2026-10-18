@@ -855,6 +855,8 @@ def health() -> dict:
         "ingest_max_chunks": s.ingest_max_chunks,
         # 任务队列后端 + 执行器存活情况（2026-10-14 阶段 B）
         "task_queue": _task_queue_health(),
+        "knowledge_tab_label": (os.getenv("KNOWLEDGE_TAB_LABEL", "了解学校").strip()[:12] or "了解学校"),
+        "assistant_tab_label": (os.getenv("ASSISTANT_TAB_LABEL", "个人助手").strip()[:12] or "个人助手"),
     }
 
 

@@ -21,11 +21,13 @@ import { useChat } from '../composables/useChat.js';
 import { useComposer } from '../composables/useComposer.js';
 import { useAssistantMode } from '../composables/useAssistantMode.js';
 import { useSites } from '../composables/useSites.js';
+import { useHealth } from '../composables/useHealth.js';
 
 const { send, stop, busy } = useChat();
 const { focusTick } = useComposer();
 const assistantMode = useAssistantMode();
 const { sites } = useSites();
+const { knowledgeTabLabel } = useHealth();
 
 // 个人助手侧的输入提示。
 // ★ 不再写死某一所学校：站点是用户自己登记的，提示语就从已登记的站点里取。
@@ -36,14 +38,14 @@ const studentHint = computed(() => {
   const alias = site && site.aliases[0];
   return alias
     ? `例如：帮我登录${alias} · Enter 发送`
-    : '例如：帮我登录校园平台 · Enter 发送';
+    : '例如：帮我查一下系统状态 · Enter 发送';
 });
 
 // 提示语整体在脚本里算好，模板里只做一次绑定：
 // 放进模板的模板字符串里就得依赖编译器把 ref 解包，不如这里明确。
 const placeholderText = computed(() =>
   assistantMode.value === 'school'
-    ? '询问校园知识库 · Enter 发送 · Shift+Enter 换行'
+    ? `${knowledgeTabLabel.value} · Enter 发送 · Shift+Enter 换行`
     : studentHint.value,
 );
 

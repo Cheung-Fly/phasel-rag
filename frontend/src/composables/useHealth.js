@@ -30,6 +30,9 @@ const ingestMaxChunks = ref(null);
 //   却永远停在「排队中」—— 这个故障态从界面上看和「正在处理」几乎一样，
 //   必须由后端明确告知，前端才能把原因说出来。
 const taskQueue      = ref(null);
+// 两个栏目的名字由后端配置下发，开源部署可改成自己的领域。
+const knowledgeTabLabel = ref('了解学校');
+const assistantTabLabel = ref('个人助手');
 
 /**
  * 执行器是否确实离线。只在「队列后端正常但没有任何 worker 心跳」时为 true ——
@@ -57,6 +60,8 @@ async function check() {
     memoryBackend.value = d.memory_backend || '';
     chromaStatus.value  = d.chroma_status  || '';
     taskQueue.value     = d.task_queue     || null;
+    knowledgeTabLabel.value = d.knowledge_tab_label || '了解学校';
+    assistantTabLabel.value = d.assistant_tab_label || '个人助手';
 
     // 后端在向量库不可达时会把 status 降级为 degraded，
     // 这时 API 进程本身是活的，但知识库功能已经不可用 —— 必须区分开，
@@ -83,6 +88,7 @@ export function useHealth() {
   return {
     status, llmModel, memoryBackend, chromaStatus,
     maxUploadMb, ingestMaxChunks, taskQueue, workerOffline,
+    knowledgeTabLabel, assistantTabLabel,
     check, start, stop,
   };
 }

@@ -5,6 +5,7 @@
 import { computed } from 'vue';
 import { useChat } from '../composables/useChat.js';
 import { useSessions } from '../composables/useSessions.js';
+import { useHealth } from '../composables/useHealth.js';
 import MessageList from './MessageList.vue';
 import ChatComposer from './ChatComposer.vue';
 
@@ -20,6 +21,7 @@ const emit = defineEmits(['close-sidebar', 'switch-mode']);
 
 const { newChat } = useChat();
 const { currentId } = useSessions();
+const { knowledgeTabLabel, assistantTabLabel } = useHealth();
 
 // 会话 ID 太长，界面上只显示前 8 位；没有会话时显示占位符
 const tag = computed(() => (currentId.value ? currentId.value.slice(0, 8) : '—'));
@@ -36,7 +38,7 @@ const tag = computed(() => (currentId.value ? currentId.value.slice(0, 8) : '—
           :class="{ selected: props.assistantMode === 'school' }"
           :disabled="props.busy"
           @click="emit('switch-mode', 'school')"
-        >了解学校</button>
+        >{{ knowledgeTabLabel }}</button>
         <button
           type="button"
           role="tab"
@@ -44,7 +46,7 @@ const tag = computed(() => (currentId.value ? currentId.value.slice(0, 8) : '—
           :class="{ selected: props.assistantMode === 'student' }"
           :disabled="props.busy"
           @click="emit('switch-mode', 'student')"
-        >个人助手</button>
+        >{{ assistantTabLabel }}</button>
       </nav>
       <div class="chat-actions">
         <span class="session-tag" title="当前会话 ID">{{ tag }}</span>

@@ -1,0 +1,40 @@
+{
+  "name": "campus",
+  "description": "东软智慧教育平台登录站点（示例插件）",
+  "sites": [
+    {
+      "site_key": "nsu-smart-education",
+      "name": "东软智慧教育平台",
+      "aliases": [
+        "东软智慧教育平台",
+        "智慧教育平台"
+      ],
+      "host": "study.nsu.edu.cn",
+      "login_url": "https://study.nsu.edu.cn/login",
+      "username_selector": "input[placeholder=\"请输入用户名\"]",
+      "password_selector": "input[placeholder=\"请输入密码\"]",
+      "blocked_path_parts": [
+        "logout",
+        "signout",
+        "delete",
+        "remove",
+        "withdraw",
+        "submit",
+        "save",
+        "enroll",
+        "register",
+        "payment",
+        "checkout",
+        "cancel",
+        "退出",
+        "删除",
+        "提交",
+        "保存",
+        "缴费",
+        "退选",
+        "取消"
+      ],
+      "requires_captcha": true
+    }
+  ]
+}

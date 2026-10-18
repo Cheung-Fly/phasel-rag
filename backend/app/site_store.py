@@ -34,10 +34,13 @@ service_key / site_key 关联，若站点做成全局表，多用户模式下会
 保证升级后行为不变。
 """
 import ipaddress
+import json
 import logging
+import os
 import re
 import threading
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 
 from psycopg.errors import UniqueViolation
@@ -64,23 +67,30 @@ _HOST_RE = re.compile(
 
 # 内置站点：把改造前的硬编码值原样搬到数据层，保证升级后行为不变。
 # 选择器与危险路径取自 backend/browser/mcp_server.py 改造前的常量。
-BUILTIN_SITES = (
-    {
-        "site_key": "nsu-smart-education",
-        "name": "东软智慧教育平台",
-        "aliases": ["东软智慧教育平台", "智慧教育平台"],
-        "host": "study.nsu.edu.cn",
-        "login_url": "https://study.nsu.edu.cn/login",
-        "username_selector": 'input[placeholder="请输入用户名"]',
-        "password_selector": 'input[placeholder="请输入密码"]',
-        "blocked_path_parts": [
-            "logout", "signout", "delete", "remove", "withdraw", "submit",
-            "save", "enroll", "register", "payment", "checkout", "cancel",
-            "退出", "删除", "提交", "保存", "缴费", "退选", "取消",
-        ],
-        "requires_captcha": True,
-    },
-)
+# 内置站点由插件提供（app/plugins/<name>/plugin.json），ENABLED_PLUGINS 控制启用哪些。
+# 默认只启用 campus，保持升级前行为；设为空串即得到不含任何校园内容的通用助手。
+_PLUGINS_DIR = Path(__file__).parent / "plugins"
+
+
+def _load_plugin_sites() -> tuple[dict, ...]:
+    enabled = [
+        name.strip()
+        for name in os.getenv("ENABLED_PLUGINS", "campus").split(",")
+        if re.fullmatch(r"[a-z0-9_-]+", name.strip())
+    ]
+    sites: list[dict] = []
+    for name in enabled:
+        path = _PLUGINS_DIR / name / "plugin.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.error("插件 %s 无法加载，已跳过", name)
+            continue
+        sites.extend(item for item in data.get("sites", []) if isinstance(item, dict))
+    return tuple(sites)
+
+
+BUILTIN_SITES = _load_plugin_sites()
 
 
 class SiteValidationError(ValueError):

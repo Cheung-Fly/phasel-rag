@@ -36,14 +36,22 @@ async function asJson(resp) {
   return resp.json();
 }
 
-const json = (url, init) =>
-  fetch(url, { credentials: 'same-origin', ...init }).then(asJson);
+// 带字符串 body 的请求默认按 JSON 发送；不加这个头后端会按 text/plain 拒绝。
+const json = (url, init = {}) =>
+  fetch(url, {
+    credentials: 'same-origin',
+    ...init,
+    headers: typeof init.body === 'string' ? { 'Content-Type': 'application/json', ...init.headers } : init.headers,
+  }).then(asJson);
 
 export const api = {
   /* ---------- 基础 ---------- */
   health: () => json('/health'),
   extensions: () => json('/api/extensions'),
   mcpServers: () => json('/api/mcp/servers'),
+  skills: () => json('/api/skills'),
+  saveSkill: (body) => json('/api/skills', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  deleteSkill: (name) => json(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   models: () => json('/api/models'),
   saveModel: (body) => json('/api/models', { method: 'POST', body: JSON.stringify(body) }),
   activateModel: (id) => json(`/api/models/${id}/activate`, { method: 'POST' }),

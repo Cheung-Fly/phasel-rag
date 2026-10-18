@@ -82,8 +82,8 @@ services:
       #   经 GET /api/artifacts/{file} 读回前端。只读挂载：api 不写分析产物，
       #   写权仍归 shell 沙箱，少一条可写路径就少一条被篡改的入口。
       - ./data/shell-work:/app/data/shell-work:ro
-      # Optional read-only Skills. MCP_SERVERS_JSON controls enabled servers.
-      - ./skills:/app/skills:ro
+      # Skills：可写，前端「添加/删除 Skill」会直接写这个目录。
+      - ./skills:/app/skills
       # ★ 2026-10-07 调整五删掉了这里原有的 ./frontend:/app/frontend:ro。
       #   API 已不再托管任何前端（main.py 里的 /ui 挂载与 StaticFiles 一并移除），
       #   继续挂一份前端文件进来只会让后来者以为「这里还有一条前端通路」。

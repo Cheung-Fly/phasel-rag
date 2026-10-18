@@ -46,7 +46,14 @@ from .browser_agent import answer_browser_task
 from .shell_agent import answer_shell_task, intends_shell as _intends_shell
 from .analysis_agent import answer_analysis_task, intends_analysis as _intends_analysis
 from .extension_agent import answer_extension_task
-from .extensions import MCP_TIMEOUT_SECONDS, ExtensionManager, extension_snapshot
+from .extensions import (
+    MCP_TIMEOUT_SECONDS,
+    ExtensionManager,
+    delete_skill,
+    extension_snapshot,
+    load_skills,
+    save_skill,
+)
 from .approval_store import (
     STATUS_APPROVED,
     STATUS_EXECUTED,
@@ -2142,6 +2149,39 @@ def chat(
 @app.get("/api/extensions", tags=["扩展"], summary="列出当前启用的 Skill 和 MCP")
 def extensions(user: AuthenticatedUser = Depends(_current_user)) -> dict:
     return extension_snapshot(user.user_id)
+
+
+class SkillRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    content: str = Field(min_length=1, max_length=12000)
+
+
+@app.get("/api/skills", tags=["扩展"], summary="列出 Skill（含内容）")
+def list_skills_route(user: AuthenticatedUser = Depends(_current_user)) -> dict:
+    return {"skills": load_skills()}
+
+
+@app.post("/api/skills", tags=["扩展"], summary="添加或更新 Skill")
+def save_skill_route(
+    req: SkillRequest, user: AuthenticatedUser = Depends(_current_user)
+) -> dict:
+    try:
+        save_skill(req.name, req.content)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except OSError as exc:
+        logger.error("Skill write failed: %s", type(exc).__name__)
+        raise HTTPException(500, "Skill 写入失败，请检查 skills 目录权限") from exc
+    return {"name": req.name}
+
+
+@app.delete("/api/skills/{name}", tags=["扩展"], summary="删除 Skill")
+def delete_skill_route(
+    name: str, user: AuthenticatedUser = Depends(_current_user)
+) -> dict:
+    if not delete_skill(name):
+        raise HTTPException(404, "未找到该 Skill")
+    return {"deleted": name}
 
 
 @app.get("/api/mcp/servers", tags=["扩展"], summary="列出当前用户的 MCP 服务")

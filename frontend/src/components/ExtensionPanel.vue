@@ -1,104 +1,131 @@
 <script setup>
-import { computed, onMounted } from 'vue';
-import { ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useExtensions } from '../composables/useExtensions.js';
 import { api } from '../lib/api.js';
+import ModalDialog from './ModalDialog.vue';
 
 const { snapshot, loading, error, refresh } = useExtensions();
 const enabledServers = computed(() => snapshot.value.mcp_servers.filter((item) => item.enabled));
+
+const dialog = ref('');
+const message = ref('');
+const failed = ref(false);
+
+const skills = ref([]);
+const skillForm = ref({ name: '', content: '' });
 const servers = ref([]);
-const serverName = ref('');
-const serverUrl = ref('');
-const serverError = ref('');
+const serverForm = ref({ name: '', url: '' });
 
+async function loadSkills() {
+  skills.value = (await api.skills()).skills || [];
+}
 async function loadServers() {
+  servers.value = (await api.mcpServers()).servers || [];
+}
+
+async function run(action, success) {
+  message.value = '';
+  failed.value = false;
   try {
-    servers.value = (await api.mcpServers()).servers || [];
+    const result = await action();
+    message.value = typeof success === 'function' ? success(result) : success;
   } catch (exception) {
-    serverError.value = exception.message || 'MCP 配置读取失败';
+    failed.value = true;
+    message.value = exception.message || '操作失败';
   }
+  await Promise.all([refresh(), loadSkills().catch(() => {}), loadServers().catch(() => {})]);
 }
 
-async function saveServer() {
-  serverError.value = '';
-  try {
-    await api.saveMcpServer({ name: serverName.value, transport: 'streamable_http', url: serverUrl.value });
-    serverName.value = '';
-    serverUrl.value = '';
-    await Promise.all([refresh(), loadServers()]);
-  } catch (exception) {
-    serverError.value = exception.message || 'MCP 保存失败';
-  }
+function openDialog(kind) {
+  message.value = '';
+  dialog.value = kind;
 }
 
-async function removeServer(id) {
-  await api.deleteMcpServer(id);
-  await Promise.all([refresh(), loadServers()]);
+function editSkill(skill) {
+  skillForm.value = { name: skill.name, content: skill.content };
 }
 
-async function testServer(id) {
-  try {
-    const result = await api.testMcpServer(id);
-    serverError.value = `${result.server} 已发现 ${result.tool_count} 个工具`;
-  } catch (exception) {
-    serverError.value = exception.message || 'MCP 测试失败';
-  }
+function saveSkill() {
+  return run(async () => {
+    await api.saveSkill(skillForm.value);
+    skillForm.value = { name: '', content: '' };
+  }, 'Skill 已保存');
 }
 
-onMounted(() => Promise.all([refresh(), loadServers()]));
+function saveServer() {
+  return run(async () => {
+    await api.saveMcpServer({ name: serverForm.value.name, transport: 'streamable_http', url: serverForm.value.url });
+    serverForm.value = { name: '', url: '' };
+  }, 'MCP 已添加');
+}
+
+onMounted(() => Promise.all([refresh(), loadSkills().catch(() => {}), loadServers().catch(() => {})]));
 </script>
 
 <template>
   <section class="panel extension-panel">
     <h2 class="panel-title">扩展能力</h2>
-    <p v-if="loading" class="extension-muted">正在读取 Skill / MCP…</p>
+    <p v-if="loading && !snapshot.skills.length" class="extension-muted">正在读取 Skill / MCP…</p>
     <p v-else-if="error" class="extension-error">{{ error }}</p>
     <template v-else>
       <div class="extension-row">
-        <span>Skill</span>
-        <strong>{{ snapshot.skills.length }}</strong>
+        <span>Skill · {{ snapshot.skills.length }}</span>
+        <button type="button" class="btn-ghost" @click="openDialog('skill')">管理</button>
       </div>
       <div class="extension-row">
-        <span>MCP</span>
-        <strong>{{ enabledServers.length }}</strong>
+        <span>MCP · {{ enabledServers.length }}</span>
+        <button type="button" class="btn-ghost" @click="openDialog('mcp')">管理</button>
       </div>
       <p class="extension-hint">
         使用 <code>/skill</code> 或 <code>/mcp</code> 调用已启用扩展。
       </p>
-      <ul v-if="snapshot.skills.length || enabledServers.length" class="extension-list">
-        <li v-for="skill in snapshot.skills" :key="`skill-${skill.name}`">Skill · {{ skill.name }}</li>
-        <li v-for="server in enabledServers" :key="`mcp-${server.name}`">
-          MCP · {{ server.name }}（{{ server.transport }}）
-        </li>
-      </ul>
-      <form class="mcp-form" @submit.prevent="saveServer">
-        <input v-model="serverName" required maxlength="80" placeholder="MCP 名称" />
-        <input v-model="serverUrl" required type="url" placeholder="https://example.com/mcp" />
-        <button type="submit" class="btn-ghost">添加 HTTP MCP</button>
-      </form>
-      <p v-if="serverError" class="extension-error">{{ serverError }}</p>
-      <ul v-if="servers.length" class="extension-list">
-        <li v-for="server in servers" :key="server.server_id">
-          {{ server.name }} · {{ server.enabled ? '启用' : '停用' }}
-          <button type="button" class="link-button" @click="testServer(server.server_id)">测试</button>
-          <button type="button" class="link-button" @click="removeServer(server.server_id)">删除</button>
-        </li>
-      </ul>
     </template>
-    <button type="button" class="btn-ghost extension-refresh" @click="refresh">刷新状态</button>
   </section>
+
+  <ModalDialog v-if="dialog === 'skill'" title="管理 Skill" @close="dialog = ''">
+    <h4>已添加的 Skill</h4>
+    <ul v-if="skills.length" class="modal-list">
+      <li v-for="skill in skills" :key="skill.name">
+        <span>{{ skill.name }}</span>
+        <button type="button" class="link-button" @click="editSkill(skill)">编辑</button>
+        <button type="button" class="link-button" @click="run(() => api.deleteSkill(skill.name), '已删除')">删除</button>
+      </li>
+    </ul>
+    <p v-else class="modal-msg">还没有 Skill。</p>
+    <h4>添加 / 编辑 Skill</h4>
+    <form class="modal-form" @submit.prevent="saveSkill">
+      <input v-model="skillForm.name" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_\-]*" placeholder="名称（字母、数字、下划线、连字符）" />
+      <textarea v-model="skillForm.content" required maxlength="12000" placeholder="SKILL.md 内容：说明这个 Skill 做什么、怎么做"></textarea>
+      <button type="submit" class="btn-ghost">保存 Skill</button>
+    </form>
+    <p v-if="message" class="modal-msg" :class="{ err: failed }">{{ message }}</p>
+  </ModalDialog>
+
+  <ModalDialog v-if="dialog === 'mcp'" title="管理 MCP" @close="dialog = ''">
+    <h4>已添加的 MCP</h4>
+    <ul v-if="servers.length" class="modal-list">
+      <li v-for="server in servers" :key="server.server_id">
+        <span>{{ server.name }} · {{ server.enabled ? '启用' : '停用' }}</span>
+        <button type="button" class="link-button" @click="run(() => api.testMcpServer(server.server_id), (r) => `${r.server} 已发现 ${r.tool_count} 个工具`)">测试</button>
+        <button type="button" class="link-button" @click="run(() => api.toggleMcpServer(server.server_id, !server.enabled), server.enabled ? '已停用' : '已启用')">{{ server.enabled ? '停用' : '启用' }}</button>
+        <button type="button" class="link-button" @click="run(() => api.deleteMcpServer(server.server_id), '已删除')">删除</button>
+      </li>
+    </ul>
+    <p v-else class="modal-msg">还没有 MCP 服务。</p>
+    <h4>添加 HTTP MCP</h4>
+    <form class="modal-form" @submit.prevent="saveServer">
+      <input v-model="serverForm.name" required maxlength="80" placeholder="MCP 名称" />
+      <input v-model="serverForm.url" required type="url" placeholder="https://example.com/mcp" />
+      <button type="submit" class="btn-ghost">添加 MCP</button>
+    </form>
+    <p v-if="message" class="modal-msg" :class="{ err: failed }">{{ message }}</p>
+  </ModalDialog>
 </template>
 
 <style scoped>
 .extension-panel { gap: 6px; }
-.extension-row { display: flex; justify-content: space-between; color: var(--text-dim); font-size: 12px; }
-.extension-row strong { color: var(--text); }
+.extension-row { display: flex; justify-content: space-between; align-items: center; color: var(--text-dim); font-size: 12px; }
 .extension-muted, .extension-error, .extension-hint { margin: 0; font-size: 11px; color: var(--text-faint); }
 .extension-error { color: var(--err); }
 .extension-hint code { color: var(--accent); }
-.extension-list { margin: 2px 0 0; padding-left: 18px; color: var(--text-dim); font-size: 11px; }
-.extension-refresh { align-self: flex-start; margin-top: 2px; }
-.mcp-form { display: grid; gap: 5px; margin-top: 5px; }
-.mcp-form input { min-width: 0; border: 1px solid var(--border); border-radius: 5px; padding: 5px; background: var(--surface); color: var(--text); font-size: 11px; }
-.link-button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 11px; padding: 0 3px; }
 </style>

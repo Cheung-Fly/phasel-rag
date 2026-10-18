@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -65,6 +66,33 @@ def load_skills() -> list[dict]:
             continue
         skills.append({"name": path.parent.name, "content": content})
     return skills
+
+
+_SKILL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def save_skill(name: str, content: str) -> None:
+    if not _SKILL_NAME.fullmatch(name):
+        raise ValueError("Skill 名称只能用字母、数字、下划线和连字符（最长 64 位）")
+    if not content.strip() or len(content) > MAX_SKILL_CHARS:
+        raise ValueError(f"Skill 内容不能为空，且不超过 {MAX_SKILL_CHARS} 字")
+    target = SKILLS_DIR / name
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "SKILL.md").write_text(content, encoding="utf-8")
+
+
+def delete_skill(name: str) -> bool:
+    if not _SKILL_NAME.fullmatch(name):
+        return False
+    target = SKILLS_DIR / name
+    if not (target / "SKILL.md").is_file():
+        return False
+    (target / "SKILL.md").unlink()
+    try:
+        target.rmdir()
+    except OSError:
+        pass
+    return True
 
 
 def _env_servers() -> dict:

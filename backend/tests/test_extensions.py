@@ -157,3 +157,22 @@ class ServerConfigMergeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SkillWriteTests(unittest.TestCase):
+    def test_save_and_delete_skill(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(extensions, "SKILLS_DIR", Path(root)):
+            extensions.save_skill("my-skill", "# 说明")
+            self.assertEqual([s["name"] for s in extensions.load_skills()], ["my-skill"])
+            self.assertTrue(extensions.delete_skill("my-skill"))
+            self.assertEqual(extensions.load_skills(), [])
+            self.assertFalse(extensions.delete_skill("my-skill"))
+
+    def test_rejects_path_traversal_and_empty(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(extensions, "SKILLS_DIR", Path(root)):
+            for bad in ("../x", "a/b", "", ".hidden"):
+                with self.assertRaises(ValueError):
+                    extensions.save_skill(bad, "x")
+            with self.assertRaises(ValueError):
+                extensions.save_skill("ok", "  ")
+            self.assertFalse(extensions.delete_skill("../etc"))

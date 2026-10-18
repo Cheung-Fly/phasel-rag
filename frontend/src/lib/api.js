@@ -25,6 +25,10 @@ async function asJson(resp) {
     } catch {
       detail = await resp.text().catch(() => '');
     }
+    // 登录会话中途过期：通知 App 回到登录页（登录请求本身的 401 是口令错误，不触发）
+    if (resp.status === 401 && !resp.url.endsWith('/api/auth/login')) {
+      window.dispatchEvent(new Event('auth-expired'));
+    }
     const err = new Error(detail || `HTTP ${resp.status} ${resp.statusText}`);
     err.status = resp.status;
     throw err;

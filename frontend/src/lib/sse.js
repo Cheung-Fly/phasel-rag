@@ -34,6 +34,7 @@ export async function postStream(url, body, onEvent, signal) {
     signal,                       // 传下去，abort() 时 fetch 会抛 AbortError
   });
 
+  if (resp.status === 401) window.dispatchEvent(new Event('auth-expired'));
   if (!resp.ok) {
     // 尽量把后端的 detail 读出来，比裸的状态码有用得多
     let detail = '';

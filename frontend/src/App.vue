@@ -198,6 +198,11 @@ async function submitLogin() {
   }
 }
 
+function onAuthExpired() {
+  needsLogin.value = true;
+  loginError.value = '登录已过期，请重新输入口令';
+}
+
 async function logout() {
   try {
     await api.authLogout();
@@ -214,11 +219,13 @@ async function retryBoot() {
 onMounted(async () => {
   applyTheme();
   window.addEventListener('keydown', onKeydown);
+  window.addEventListener('auth-expired', onAuthExpired);
   await bootstrap();
 });
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown);
+  window.removeEventListener('auth-expired', onAuthExpired);
   // 停止轮询，避免组件销毁后定时器还在打接口（开发期热更新时尤其明显）
   stopHealth();
 });

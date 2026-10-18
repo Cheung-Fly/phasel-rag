@@ -45,6 +45,8 @@ from . import rag
 from .browser_agent import answer_browser_task
 from .shell_agent import answer_shell_task, intends_shell as _intends_shell
 from .analysis_agent import answer_analysis_task, intends_analysis as _intends_analysis
+from .extension_agent import answer_extension_task
+from .extensions import MCP_TIMEOUT_SECONDS, ExtensionManager, extension_snapshot
 from .approval_store import (
     STATUS_APPROVED,
     STATUS_EXECUTED,
@@ -85,6 +87,8 @@ from .site_store import (
 )
 from .suggestion_store import get_suggestion_store
 from .task_store import close_task_store, get_task_store, get_task_store_or_none
+from .mcp_store import close_mcp_store, get_mcp_store, get_mcp_store_or_none
+from .model_store import active_profile, close_model_store, get_model_store, set_default_model_owner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -148,6 +152,8 @@ async def prevent_sensitive_response_caching(request: Request, call_next):
             "/api/sites",
             "/api/approvals",
             "/api/audit",
+            "/api/models",
+            "/api/mcp",
         )
     ):
         # /api/tasks 也加进来：任务状态是「此刻的进度」，被浏览器或中间层缓存
@@ -252,6 +258,38 @@ class BrowserActionRequest(BaseModel):
     key: str = Field(default="", max_length=16)
 
 
+class ModelProfileRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=200)
+    base_url: str = Field(min_length=1, max_length=2048)
+    api_key: str = Field(min_length=1, max_length=4096)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        parsed = urlsplit(value.strip())
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("模型端点必须是无凭据的 HTTPS 地址")
+        return value.strip().rstrip("/")
+
+
+class McpServerRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    transport: Literal["streamable_http", "stdio"] = "streamable_http"
+    url: str = Field(default="", max_length=2048)
+    command: str = Field(default="", max_length=256)
+    args: list[str] = Field(default_factory=list, max_length=32)
+    enabled: bool = True
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        value = value.strip()
+        if value and not value.startswith("https://"):
+            raise ValueError("HTTP MCP 必须使用 HTTPS URL")
+        return value
+
+
 def _get_auth_store():
     try:
         return get_auth_store()
@@ -346,6 +384,22 @@ def _requested_login_target(question: str, user: AuthenticatedUser) -> dict | No
     ):
         return None
     return _match_login_target(question, user.user_id)
+
+
+def _requests_extension(question: str, owner_user_id: str | None = None) -> bool:
+    value = question.strip().casefold()
+    if value.startswith(("/mcp ", "/skill ", "使用 mcp", "使用技能")):
+        return True
+    if not owner_user_id:
+        return False
+    # 自然语言路由：问题里直接点名了已启用的 MCP 服务或 Skill。
+    try:
+        snapshot = extension_snapshot(owner_user_id)
+    except Exception:
+        return False
+    names = [item["name"] for item in snapshot["skills"]]
+    names += [item["name"] for item in snapshot["mcp_servers"] if item["enabled"]]
+    return any(len(name) >= 2 and name.casefold() in value for name in names)
 
 
 # ★ 这里曾经有 _requested_open_target / _requested_browser_task 两张关键词表，
@@ -786,7 +840,7 @@ def health() -> dict:
         # 但知识库功能已经不可用，不该报 ok。
         "status": "ok" if chroma_status == "ok" else "degraded",
         "llm_provider": s.llm_provider,
-        "llm_model": s.llm_model,
+        "llm_model": (active_profile() or {}).get("model", s.llm_model),
         "embedding_model": s.embedding_model,
         # 由 MemoryStore 自报【运行态】而非读配置：原先 health 直接返回
         # 配置里有没有填 REDIS_URL，结果是"填了但 redis 包没装"时照样报 redis，
@@ -810,6 +864,8 @@ def close_persistence_pools() -> None:
     close_task_store()
     close_site_store()
     close_approval_store()
+    close_mcp_store()
+    close_model_store()
     close_audit_timeline()
 
 
@@ -822,6 +878,7 @@ def initialize_owner_scoping() -> None:
         # 应该在启动日志里立刻可见；拖到用户第一次提问才报 503，
         # 现象会是「页面能打开但什么都查不到」，排查方向完全被带偏。
         owner = _local_owner()
+        set_default_model_owner(owner.user_id)
         logger.info(
             "认证模式 local（免登录）：本机主人身份 = %s (user_id=%s)",
             owner.username,
@@ -865,6 +922,10 @@ def initialize_owner_scoping() -> None:
         )
     else:
         logger.info("操作审批闸门已就绪（PostgreSQL）")
+    if get_mcp_store_or_none() is None:
+        logger.error("MCP 配置存储初始化失败：MCP 管理功能不可用")
+    else:
+        logger.info("MCP 配置存储已就绪")
     # 审计时间线（阶段 C ④）。只读模型，它挂了不影响别的功能，但「助手做过什么」
     # 这一页会空掉 —— 而一页空白的时间线比一页报错更危险：用户会以为「助手
     # 什么都没做」，实际上可能是查不出来。所以这里必须留下启动日志。
@@ -1448,6 +1509,41 @@ async def _execute_analysis_approval(
     return {"status": STATUS_FAILED, "reason": status or "unknown_status", "stdout": stdout}
 
 
+async def _execute_mcp_approval(
+    user: AuthenticatedUser,
+    approval_id: str,
+    approval: dict,
+    store,
+) -> dict:
+    claimed = store.begin_execution(user.user_id, approval_id)
+    if claimed is None:
+        raise HTTPException(409, "该审批正在执行或已过期")
+    detail = claimed.get("detail") or {}
+    try:
+        result = await ExtensionManager().call(
+            detail["tool_name"],
+            detail.get("arguments") or {},
+            user.user_id,
+        )
+        store.complete_execution(
+            user.user_id,
+            approval_id,
+            outcome=STATUS_EXECUTED,
+            detail={"tool_name": detail["tool_name"]},
+            merge_detail={"result": result[:12000]},
+        )
+        return {"status": STATUS_EXECUTED, "result": result}
+    except Exception as exc:
+        logger.error("MCP tool execution failed: %s", type(exc).__name__)
+        store.complete_execution(
+            user.user_id,
+            approval_id,
+            outcome=STATUS_FAILED,
+            detail={"reason": "mcp_tool_failed"},
+        )
+        raise HTTPException(502, "MCP 工具执行失败，请检查外部服务状态") from exc
+
+
 @app.get("/api/artifacts/{filename}", tags=["数据分析"], summary="读取数据分析生成的图表文件")
 def get_analysis_artifact(
     filename: str,
@@ -1588,6 +1684,8 @@ async def execute_operation(
         return await _execute_shell_approval(user, approval_id, approval, store)
     if approval["action"] == "data_analysis":
         return await _execute_analysis_approval(user, approval_id, approval, store)
+    if approval["action"] == "mcp_tool":
+        return await _execute_mcp_approval(user, approval_id, approval, store)
 
     if not browser_breaker.allow():
         # 电路已断开 ⇒ 请求根本没发出去，点击不可能发生 ⇒ 审批保持 approved，
@@ -1942,6 +2040,16 @@ def chat(
                 "session_id": session_id,
                 "browser_session_active": browser_session_active,
             }
+        if _requests_extension(req.question, user.user_id):
+            extension_task = answer_extension_task(req.question, user.user_id)
+            get_memory().append_for_user(
+                user.user_id, session_id, req.question, extension_task["answer"]
+            )
+            return {
+                "answer": extension_task["answer"],
+                "sources": [],
+                "session_id": session_id,
+            }
         # analysis 意图路由（阶段 D 之后新增，对标 Muse「按需造工具」）：
         # 问题明确要求「分析本地数据文件」时走 analysis 循环。
         if _intends_analysis(req.question):
@@ -1986,6 +2094,16 @@ def chat(
             "click_approval": task["approval"],
         }
     try:
+        if _requests_extension(req.question, user.user_id):
+            extension_task = answer_extension_task(req.question, user.user_id)
+            get_memory().append_for_user(
+                user.user_id, session_id, req.question, extension_task["answer"]
+            )
+            return {
+                "answer": extension_task["answer"],
+                "sources": [],
+                "session_id": session_id,
+            }
         result = rag.answer(req.question, session_id, user.user_id)
         _enqueue_fact_extraction(
             user.user_id, session_id, req.question, result.get("answer", "")
@@ -1996,6 +2114,78 @@ def chat(
     except Exception as exc:
         logger.exception("chat failed")
         raise HTTPException(500, f"生成失败：{exc}") from exc
+
+
+@app.get("/api/extensions", tags=["扩展"], summary="列出当前启用的 Skill 和 MCP")
+def extensions(user: AuthenticatedUser = Depends(_current_user)) -> dict:
+    return extension_snapshot(user.user_id)
+
+
+@app.get("/api/mcp/servers", tags=["扩展"], summary="列出当前用户的 MCP 服务")
+def list_mcp_servers(user: AuthenticatedUser = Depends(_current_user)) -> dict:
+    return {"servers": get_mcp_store().list(user.user_id)}
+
+
+@app.post("/api/mcp/servers", tags=["扩展"], summary="保存当前用户的 MCP 服务")
+def save_mcp_server(
+    req: McpServerRequest,
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    if req.transport == "streamable_http" and not req.url:
+        raise HTTPException(422, "HTTP MCP 必须填写 URL")
+    if req.transport == "stdio" and not req.command:
+        raise HTTPException(422, "stdio MCP 必须填写 command")
+    config = {
+        "transport": req.transport,
+        "enabled": req.enabled,
+        **({"url": req.url} if req.transport == "streamable_http" else {}),
+        **({"command": req.command, "args": req.args} if req.transport == "stdio" else {}),
+    }
+    try:
+        return {"server": get_mcp_store().save(user.user_id, req.name, config)}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/mcp/servers/{server_id}/test", tags=["扩展"], summary="测试 MCP 连接")
+async def test_mcp_server(
+    server_id: str,
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    entry = get_mcp_store().get_config(user.user_id, server_id)
+    if entry is None:
+        raise HTTPException(404, "未找到该 MCP 服务")
+    metadata, config = entry
+    try:
+        tools = await asyncio.wait_for(
+            ExtensionManager()._discover(metadata["name"], config), MCP_TIMEOUT_SECONDS
+        )
+    except Exception as exc:
+        logger.error("MCP connection test failed: %s", type(exc).__name__)
+        raise HTTPException(502, "MCP 连接或工具发现失败") from exc
+    return {"ok": True, "server": metadata["name"], "tool_count": len(tools)}
+
+
+@app.patch("/api/mcp/servers/{server_id}", tags=["扩展"], summary="启用或禁用 MCP 服务")
+def toggle_mcp_server(
+    server_id: str,
+    enabled: bool = Query(...),
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    server = get_mcp_store().set_enabled(user.user_id, server_id, enabled)
+    if server is None:
+        raise HTTPException(404, "未找到该 MCP 服务")
+    return {"server": server}
+
+
+@app.delete("/api/mcp/servers/{server_id}", tags=["扩展"], summary="删除 MCP 服务")
+def delete_mcp_server(
+    server_id: str,
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    if not get_mcp_store().delete(user.user_id, server_id):
+        raise HTTPException(404, "未找到该 MCP 服务")
+    return {"deleted": True}
 
 
 @app.post("/api/chat/stream", tags=["问答"], summary="问答（SSE 流式逐字返回）")
@@ -2054,6 +2244,16 @@ def chat_stream(
                     yield sse({"type": "token", "text": answer})
                     yield sse({"type": "done", "session_id": session_id})
                     return
+                if _requests_extension(req.question, user.user_id):
+                    extension_task = answer_extension_task(req.question, user.user_id)
+                    get_memory().append_for_user(
+                        user.user_id, session_id, req.question, extension_task["answer"]
+                    )
+                    yield sse({"type": "token", "text": extension_task["answer"]})
+                    if extension_task.get("approval"):
+                        yield sse({"type": "mcp_approval", "approval": extension_task["approval"]})
+                    yield sse({"type": "done", "session_id": session_id})
+                    return
                 # analysis 意图路由（与 /api/chat 的 student 分支一致）。
                 if _intends_analysis(req.question):
                     analysis_task = _answer_analysis_task(req.question, user, session_id)
@@ -2092,6 +2292,17 @@ def chat_stream(
                 )
                 _enqueue_fact_extraction(user.user_id, session_id, req.question, task["answer"])
                 yield sse({"type": "token", "text": task["answer"]})
+                yield sse({"type": "done", "session_id": session_id})
+                return
+
+            if _requests_extension(req.question, user.user_id):
+                extension_task = answer_extension_task(req.question, user.user_id)
+                get_memory().append_for_user(
+                    user.user_id, session_id, req.question, extension_task["answer"]
+                )
+                yield sse({"type": "token", "text": extension_task["answer"]})
+                if extension_task.get("approval"):
+                    yield sse({"type": "mcp_approval", "approval": extension_task["approval"]})
                 yield sse({"type": "done", "session_id": session_id})
                 return
 
@@ -2292,3 +2503,72 @@ def root() -> dict:
         "docs": "/docs",
         "health": "/health",
     }
+
+
+@app.get("/api/models", tags=["模型"], summary="列出模型档案")
+def list_models(user: AuthenticatedUser = Depends(_current_user)) -> dict:
+    return {
+        "default_model": get_settings().llm_model,
+        "profiles": get_model_store().list(user.user_id),
+    }
+
+
+@app.post("/api/models", tags=["模型"], summary="保存模型档案（密钥加密保存）")
+def save_model(
+    req: ModelProfileRequest,
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    return {"profile": get_model_store().save(
+        user.user_id, " ".join(req.name.split()), req.model.strip(), req.base_url, req.api_key
+    )}
+
+
+@app.post("/api/models/reset", tags=["模型"], summary="恢复使用环境变量默认模型")
+def reset_model(user: AuthenticatedUser = Depends(_current_user)) -> dict:
+    get_model_store().activate(user.user_id, None)
+    return {"active": None}
+
+
+@app.post("/api/models/{profile_id}/activate", tags=["模型"], summary="切换当前模型")
+def activate_model(
+    profile_id: str,
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    if not get_model_store().activate(user.user_id, profile_id):
+        raise HTTPException(404, "未找到该模型档案")
+    return {"active": profile_id}
+
+
+@app.post("/api/models/{profile_id}/test", tags=["模型"], summary="测试模型档案连通性")
+async def test_model(
+    profile_id: str,
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    profile = get_model_store().get(user.user_id, profile_id)
+    if profile is None:
+        raise HTTPException(404, "未找到该模型档案")
+
+    def probe() -> None:
+        from langchain_openai import ChatOpenAI
+
+        ChatOpenAI(
+            model=profile["model"], base_url=profile["base_url"],
+            api_key=profile["api_key"], max_tokens=8, max_retries=0, timeout=20,
+        ).invoke("ping")
+
+    try:
+        await run_in_threadpool(probe)
+    except Exception as exc:
+        logger.error("Model profile test failed: %s", type(exc).__name__)
+        raise HTTPException(502, "模型连接失败，请检查端点、模型名和密钥") from exc
+    return {"ok": True}
+
+
+@app.delete("/api/models/{profile_id}", tags=["模型"], summary="删除模型档案")
+def delete_model(
+    profile_id: str,
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    if not get_model_store().delete(user.user_id, profile_id):
+        raise HTTPException(404, "未找到该模型档案")
+    return {"deleted": True}

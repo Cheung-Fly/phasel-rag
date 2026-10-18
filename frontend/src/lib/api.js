@@ -36,6 +36,18 @@ const json = (url, init) =>
 export const api = {
   /* ---------- 基础 ---------- */
   health: () => json('/health'),
+  extensions: () => json('/api/extensions'),
+  mcpServers: () => json('/api/mcp/servers'),
+  models: () => json('/api/models'),
+  saveModel: (body) => json('/api/models', { method: 'POST', body: JSON.stringify(body) }),
+  activateModel: (id) => json(`/api/models/${id}/activate`, { method: 'POST' }),
+  resetModel: () => json('/api/models/reset', { method: 'POST' }),
+  testModel: (id) => json(`/api/models/${id}/test`, { method: 'POST' }),
+  deleteModel: (id) => json(`/api/models/${id}`, { method: 'DELETE' }),
+  saveMcpServer: (body) => json('/api/mcp/servers', { method: 'POST', body: JSON.stringify(body) }),
+  testMcpServer: (id) => json(`/api/mcp/servers/${id}/test`, { method: 'POST' }),
+  toggleMcpServer: (id, enabled) => json(`/api/mcp/servers/${id}?enabled=${enabled}`, { method: 'PATCH' }),
+  deleteMcpServer: (id) => json(`/api/mcp/servers/${id}`, { method: 'DELETE' }),
 
   /* ---------- 本机主人身份 ---------- */
   // 2026-10-14：单用户本地模式后，前端不再有登录/退出动作，因此

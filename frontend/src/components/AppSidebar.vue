@@ -15,6 +15,8 @@ import AuditTimelinePanel from './AuditTimelinePanel.vue';
 import SuggestionPanel from './SuggestionPanel.vue';
 import SessionList from './SessionList.vue';
 import HealthStatus from './HealthStatus.vue';
+import ExtensionPanel from './ExtensionPanel.vue';
+import ModelPanel from './ModelPanel.vue';
 
 defineProps({
   open: { type: Boolean, default: false },
@@ -25,6 +27,8 @@ defineProps({
 <template>
   <aside class="sidebar" :class="{ open }">
     <BrandBar />
+    <ModelPanel />
+    <ExtensionPanel />
     <template v-if="assistantMode === 'school'">
       <UploadPanel />
       <DocumentList />

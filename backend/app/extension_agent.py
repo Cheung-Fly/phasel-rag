@@ -47,11 +47,12 @@ def answer_extension_task(question: str, owner_user_id: str | None = None) -> di
     )
     messages = [SystemMessage(content=prompt), HumanMessage(content=question)]
     seen = 0
+    used: list[dict] = []
     while True:
         response = get_chat_model(temperature=0).bind_tools(schemas).invoke(messages)
         calls = getattr(response, "tool_calls", None) or []
         if not calls:
-            return {"handled": True, "answer": _text(response.content).strip()}
+            return {"handled": True, "answer": _text(response.content).strip(), "tools": used}
         messages.append(response)
         for call in calls:
             seen += 1
@@ -75,12 +76,15 @@ def answer_extension_task(question: str, owner_user_id: str | None = None) -> di
                         "handled": True,
                         "answer": f"工具 {name} 可能改变外部状态，已生成审批，请在下方卡片中确认后再执行。",
                         "approval": approval,
+                        "tools": used,
                     }
                 messages.append(ToolMessage(tool_call_id=call.get("id"), content=result))
                 continue
             try:
                 result = asyncio.run(manager.call(name, args, owner_user_id))
+                used.append({"name": name, "ok": True})
             except Exception as exc:
+                used.append({"name": name, "ok": False})
                 result = json.dumps({"status": "error", "reason": str(exc)}, ensure_ascii=False)
             messages.append(ToolMessage(
                 tool_call_id=call.get("id"),

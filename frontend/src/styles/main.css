@@ -631,3 +631,8 @@ body { overflow: hidden; }
   * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
   .md-body.streaming::after { animation: none; }
 }
+
+.ext-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ext-tool { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border, #ccc); }
+.ext-tool.ok { color: #1a7f37; }
+.ext-tool.fail { color: #b42318; }

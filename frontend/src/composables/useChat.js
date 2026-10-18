@@ -79,6 +79,7 @@ function push(role, text, opts = {}) {
     sources: null,
     meta: null,
     pendingApproval: null,
+    extensionTools: null,
     ...opts,
   });
   const proxy = messages.value[messages.value.length - 1];
@@ -185,6 +186,10 @@ export function useChat() {
               // 卡片展示「分析目标 + 脚本摘要」，批准后执行、回显统计结论。
               // 与 shell_approval 同构 —— 都是「先批准才执行」的写操作。
               bot.pendingApproval = ev.approval || null;
+              break;
+
+            case 'extension_tools':
+              bot.extensionTools = Array.isArray(ev.tools) && ev.tools.length ? ev.tools : null;
               break;
 
             case 'mcp_approval':

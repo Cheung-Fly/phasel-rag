@@ -90,6 +90,15 @@ async function copy() {
       <!-- 用户：原样纯文本，CSS 用 white-space: pre-wrap 保留换行 -->
       <div v-else class="md-body">{{ msg.text }}</div>
 
+      <div v-if="msg.extensionTools && msg.extensionTools.length" class="ext-tools">
+        <span
+          v-for="(t, i) in msg.extensionTools"
+          :key="i"
+          class="ext-tool"
+          :class="t.ok ? 'ok' : 'fail'"
+        >{{ t.ok ? '已调用' : '调用失败' }} {{ t.name.replace(/^mcp__/, '').replace('__', ' / ') }}</span>
+      </div>
+
       <SourceList v-if="msg.sources && msg.sources.length" :sources="msg.sources" />
 
       <!-- 个人助手：有一次「可能改变网站状态」的点击在等待批准。

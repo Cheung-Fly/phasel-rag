@@ -76,6 +76,7 @@ class MutatingToolApprovalTests(unittest.TestCase):
              patch.object(extension_agent, "load_skills", return_value=[]):
             result = extension_agent.answer_extension_task("删除 1", "u")
         self.assertEqual(result["approval"]["action"], "mcp_tool")
+        self.assertEqual(result["tools"], [])
 
 
 async def _async_value(value):

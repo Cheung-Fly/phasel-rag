@@ -2251,6 +2251,8 @@ def chat_stream(
                         user.user_id, session_id, req.question, extension_task["answer"]
                     )
                     yield sse({"type": "token", "text": extension_task["answer"]})
+                    if extension_task.get("tools"):
+                        yield sse({"type": "extension_tools", "tools": extension_task["tools"]})
                     if extension_task.get("approval"):
                         yield sse({"type": "mcp_approval", "approval": extension_task["approval"]})
                     yield sse({"type": "done", "session_id": session_id})
@@ -2302,6 +2304,8 @@ def chat_stream(
                     user.user_id, session_id, req.question, extension_task["answer"]
                 )
                 yield sse({"type": "token", "text": extension_task["answer"]})
+                if extension_task.get("tools"):
+                    yield sse({"type": "extension_tools", "tools": extension_task["tools"]})
                 if extension_task.get("approval"):
                     yield sse({"type": "mcp_approval", "approval": extension_task["approval"]})
                 yield sse({"type": "done", "session_id": session_id})

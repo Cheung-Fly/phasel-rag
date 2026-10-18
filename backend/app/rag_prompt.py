@@ -9,8 +9,8 @@ _LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 def _domain() -> str:
     # 只保留文字、数字和常见连接符；花括号会破坏提示词模板，换行会注入指令。
-    value = re.sub(r"[^\w\u4e00-\u9fff\- ]", "", os.getenv("ASSISTANT_DOMAIN", "校园"))
-    return value.strip()[:20] or "校园"
+    value = re.sub(r"[^\w\u4e00-\u9fff\- ]", "", os.getenv("ASSISTANT_DOMAIN", "个人"))
+    return value.strip()[:20] or "个人"
 
 
 _PROMPT_TEMPLATE = """你是一个严谨的@@领域@@知识库助手。

@@ -22,12 +22,18 @@ import { useComposer } from '../composables/useComposer.js';
 import { useAssistantMode } from '../composables/useAssistantMode.js';
 import { useSites } from '../composables/useSites.js';
 import { useHealth } from '../composables/useHealth.js';
+import { useModels } from '../composables/useModels.js';
 
 const { send, stop, busy } = useChat();
 const { focusTick } = useComposer();
 const assistantMode = useAssistantMode();
 const { sites } = useSites();
 const { knowledgeTabLabel } = useHealth();
+const { profiles, defaultModel, activeId, switching, select, load: loadModels } = useModels();
+
+function onModelChange(e) {
+  select(e.target.value);
+}
 
 // 个人助手侧的输入提示。
 // ★ 不再写死某一所学校：站点是用户自己登记的，提示语就从已登记的站点里取。
@@ -86,7 +92,10 @@ watch(focusTick, async () => {
   el.select();
 });
 
-onMounted(autoGrow);
+onMounted(() => {
+  autoGrow();
+  loadModels();
+});
 </script>
 
 <template>
@@ -100,6 +109,18 @@ onMounted(autoGrow);
       @keydown="onKeydown"
       @input="autoGrow"
     ></textarea>
+
+    <select
+      class="model-select"
+      title="切换所用模型"
+      aria-label="切换所用模型"
+      :value="activeId"
+      :disabled="busy || switching"
+      @change="onModelChange"
+    >
+      <option value="">默认 · {{ defaultModel }}</option>
+      <option v-for="p in profiles" :key="p.profile_id" :value="p.profile_id">{{ p.name }} · {{ p.model }}</option>
+    </select>
 
     <button
       v-if="busy"

@@ -16,8 +16,8 @@ class PersonaPromptTests(unittest.TestCase):
     def tearDown(self):
         importlib.reload(rag_prompt)
 
-    def test_default_domain_is_campus(self):
-        self.assertIn("校园知识库助手", _prompt(None))
+    def test_default_domain_is_personal(self):
+        self.assertIn("个人知识库助手", _prompt(None))
 
     def test_custom_domain_replaces_every_mention(self):
         text = _prompt("公司")

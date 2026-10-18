@@ -58,13 +58,13 @@ docker compose up -d --build
 
 ### 部署成通用助手
 
-默认值保留了校园场景。想去掉校园色彩，在 `.env` 里改这几项后重启 `api`：
+默认是个人知识库（个人 RAG）。想换成别的场景，在 `.env` 里改这几项后重启 `api`：
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `ENABLED_PLUGINS` | `campus` | 留空则不预置任何站点 |
-| `ASSISTANT_DOMAIN` | `校园` | 写进知识库回答的提示词，如“公司”“产品” |
-| `KNOWLEDGE_TAB_LABEL` | `了解学校` | 聊天顶部知识库栏目的名字 |
+| `ASSISTANT_DOMAIN` | `个人` | 写进知识库回答的提示词，如“公司”“产品” |
+| `KNOWLEDGE_TAB_LABEL` | `个人RAG` | 聊天顶部知识库栏目的名字 |
 | `ASSISTANT_TAB_LABEL` | `个人助手` | 聊天顶部助手栏目的名字 |
 
 说明：

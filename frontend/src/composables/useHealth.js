@@ -31,7 +31,7 @@ const ingestMaxChunks = ref(null);
 //   必须由后端明确告知，前端才能把原因说出来。
 const taskQueue      = ref(null);
 // 两个栏目的名字由后端配置下发，开源部署可改成自己的领域。
-const knowledgeTabLabel = ref('了解学校');
+const knowledgeTabLabel = ref('个人RAG');
 const assistantTabLabel = ref('个人助手');
 
 /**
@@ -60,7 +60,7 @@ async function check() {
     memoryBackend.value = d.memory_backend || '';
     chromaStatus.value  = d.chroma_status  || '';
     taskQueue.value     = d.task_queue     || null;
-    knowledgeTabLabel.value = d.knowledge_tab_label || '了解学校';
+    knowledgeTabLabel.value = d.knowledge_tab_label || '个人RAG';
     assistantTabLabel.value = d.assistant_tab_label || '个人助手';
 
     // 后端在向量库不可达时会把 status 降级为 degraded，

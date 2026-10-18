@@ -53,6 +53,21 @@ docker compose up -d --build
 
 - 环境变量说明见 [.env.example](.env.example)。
 - `ENABLED_PLUGINS=campus` 加载示例校园站点；留空即为通用助手。
+
+### 部署成通用助手
+
+默认值保留了校园场景。想去掉校园色彩，在 `.env` 里改这几项后重启 `api`：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `ENABLED_PLUGINS` | `campus` | 留空则不预置任何站点 |
+| `ASSISTANT_DOMAIN` | `校园` | 写进知识库回答的提示词，如“公司”“产品” |
+| `KNOWLEDGE_TAB_LABEL` | `了解学校` | 聊天顶部知识库栏目的名字 |
+| `ASSISTANT_TAB_LABEL` | `个人助手` | 聊天顶部助手栏目的名字 |
+
+说明：
+- `ASSISTANT_DOMAIN` 只保留文字、数字、连字符和空格，最长 20 个字；栏目名最长 12 个字。
+- 关闭插件只影响新库的预置内容。已经写入数据库的站点是用户数据，不会被自动删除，请在“站点”面板里手动删。
 - Skill 放在 `skills/<名称>/SKILL.md`；MCP 可在侧栏“扩展能力”面板添加（Streamable HTTP），或用 `MCP_SERVERS_JSON` 配置（含 stdio）。
 
 ## 开发与测试

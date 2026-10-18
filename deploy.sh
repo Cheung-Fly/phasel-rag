@@ -29,6 +29,10 @@ if [ ! -f .env ]; then
 fi
 ok ".env 存在 (权限 $(stat -c '%a' .env))"
 
+if [ -x scripts/preflight.sh ] || [ -f scripts/preflight.sh ]; then
+  bash scripts/preflight.sh || { bad "预检未通过，请先按上面的提示修复"; exit 1; }
+fi
+
 # 读出密钥是否已填（不打印密钥本身）
 set -a; . ./.env; set +a
 

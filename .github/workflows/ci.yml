@@ -45,3 +45,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate Compose configuration
         run: docker compose config --quiet
+      - name: Check shell script syntax
+        run: bash -n deploy.sh scripts/preflight.sh scripts/backup-data.sh

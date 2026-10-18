@@ -150,6 +150,14 @@ export const api = {
   /* ---------- 站点注册表（2026-10-15 阶段 C ①） ---------- */
   // 「助手能操作哪些站点」由用户在界面上登记，不再写死在代码里。
   // 这四个接口是那条验收口径的通道：新增一个站点全程不改 Python。
+  listCredentials: () => json('/api/credentials'),
+  getCredential: (id) => json(`/api/credentials/${encodeURIComponent(id)}`),
+  saveCredential: (body, id = '') =>
+    json(id ? `/api/credentials/${encodeURIComponent(id)}` : '/api/credentials', {
+      method: id ? 'PUT' : 'POST',
+      body: JSON.stringify(body),
+    }),
+  deleteCredential: (id) => json(`/api/credentials/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   listSites: () => json('/api/sites'),
 
   createSite: (payload) =>

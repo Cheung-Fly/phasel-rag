@@ -16,6 +16,7 @@ import SessionList from './SessionList.vue';
 import HealthStatus from './HealthStatus.vue';
 import ExtensionPanel from './ExtensionPanel.vue';
 import ModelPanel from './ModelPanel.vue';
+import CredentialPanel from './CredentialPanel.vue';
 
 defineProps({
   open: { type: Boolean, default: false },
@@ -40,6 +41,7 @@ defineProps({
          「登录 XX」这句话本身也只在个人助手里才有意义。 -->
     <template v-else>
       <SitePanel />
+      <CredentialPanel />
       <!-- 待批准操作放在审计时间线**上方**：先看到「等我点头的事」，
            再看「已经做过的事」。二者一前一后，构成完整的信任闭环。 -->
       <ApprovalPanel />

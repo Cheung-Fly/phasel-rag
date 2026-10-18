@@ -168,8 +168,12 @@ class AgentBrowser:
                 timeout=timeout, check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"agent-browser {args[0] if args else ''} unavailable: {type(exc).__name__}", flush=True)
             raise AgentBrowserError("agent-browser unavailable") from exc
         if result.returncode:
+            # 只记子命令名；输入类命令的输出可能带口令，不记内容。
+            detail = "" if args and args[0] in ("keyboard", "fill", "type") else (result.stderr or result.stdout).strip()[:200]
+            print(f"agent-browser {args[0] if args else ''} failed: {detail}", flush=True)
             raise AgentBrowserError("agent-browser command failed")
         return result.stdout.strip()
 

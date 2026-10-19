@@ -16,7 +16,7 @@ class DocumentParsingTests(unittest.TestCase):
                 self.assertEqual(rag.validate_upload(f"document{suffix}"), suffix)
 
     def test_legacy_formats_remain_supported(self):
-        for suffix in (".pdf", ".md", ".markdown", ".txt"):
+        for suffix in (".pdf", ".md", ".markdown", ".txt", ".html", ".htm"):
             with self.subTest(suffix=suffix):
                 self.assertEqual(rag.validate_upload(f"document{suffix}"), suffix)
 
@@ -49,6 +49,24 @@ class DocumentParsingTests(unittest.TestCase):
             path = Path(directory) / "document.txt"
             path.write_bytes(b"hello\xff")
             self.assertEqual(rag._parse_file(path), "hello\ufffd")
+
+    def test_html_extracts_article_and_title_without_running_page_scripts(self):
+        article = (
+            "This saved article explains personal knowledge management and "
+            "how source documents can be organized for reliable search. "
+        ) * 8
+        html = f"""<!doctype html>
+        <html><head><title>Local Research Notes</title></head>
+        <body><nav>Navigation noise</nav><main><article><h1>Research</h1>
+        <p>{article}</p></article></main><script>UNTRUSTED_SCRIPT_TEXT</script></body></html>"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "saved.html"
+            path.write_text(html, encoding="utf-8")
+            result = rag._parse_file(path)
+
+        self.assertIn("Research", result)
+        self.assertIn("personal knowledge management", result)
+        self.assertNotIn("UNTRUSTED_SCRIPT_TEXT", result)
 
     def test_unsupported_format_is_rejected(self):
         with self.assertRaises(ValueError):

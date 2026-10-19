@@ -39,8 +39,12 @@ from .vectorstore import get_vectorstore
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED = {".pdf", ".md", ".markdown", ".txt", ".docx", ".pptx", ".xlsx"}
+SUPPORTED = {
+    ".pdf", ".md", ".markdown", ".txt",
+    ".docx", ".pptx", ".xlsx", ".html", ".htm",
+}
 MARKITDOWN_FORMATS = {".docx", ".pptx", ".xlsx"}
+HTML_FORMATS = {".html", ".htm"}
 MAX_OFFICE_ARCHIVE_BYTES = 100 * 1024 * 1024
 MAX_OFFICE_ARCHIVE_ENTRIES = 10_000
 
@@ -168,6 +172,24 @@ def _parse_file(path: Path) -> str:
         from markitdown import MarkItDown
 
         return MarkItDown(enable_plugins=False).convert(str(path)).markdown
+    if suffix in HTML_FORMATS:
+        from trafilatura import extract, extract_metadata
+
+        html = path.read_text(encoding="utf-8", errors="replace")
+        content = extract(
+            html,
+            output_format="markdown",
+            include_links=True,
+            include_tables=True,
+            favor_precision=True,
+        )
+        if not content:
+            raise ValueError("HTML 文件中未提取到正文内容")
+        metadata = extract_metadata(html)
+        title = metadata.title if metadata else None
+        if title and title.casefold() not in content[:500].casefold():
+            content = f"# {title}\n\n{content}"
+        return content
     # .md / .markdown / .txt 统一按 UTF-8 读，容错非法字节
     return path.read_text(encoding="utf-8", errors="replace")
 

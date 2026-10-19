@@ -51,10 +51,10 @@ function onDrop(e) {
       <span class="dz-icon">＋</span>
       <span class="dz-text">点击选择，或拖文件到这里</span>
       <!-- 上限取自后端 /health，不写死（见 useHealth 注释） -->
-      <span class="dz-hint">.md / .txt / .pdf / .docx / .pptx / .xlsx · 最大 {{ maxUploadMb }}MB</span>
+      <span class="dz-hint">.md / .txt / .pdf / .docx / .pptx / .xlsx / .html · 最大 {{ maxUploadMb }}MB</span>
     </label>
 
-    <input type="file" id="fileInput" accept=".md,.markdown,.txt,.pdf,.docx,.pptx,.xlsx" hidden @change="pick">
+    <input type="file" id="fileInput" accept=".md,.markdown,.txt,.pdf,.docx,.pptx,.xlsx,.html,.htm" hidden @change="pick">
 
     <div v-if="uploader.active" class="upload-progress">
       <div class="up-name">{{ uploader.name }}</div>

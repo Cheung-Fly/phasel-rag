@@ -6,7 +6,7 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| 对话与知识库 | RAG 检索、会话记忆，文档上传入库 |
+| 对话与知识库 | RAG 检索、会话记忆，支持 PDF、Markdown、TXT、Word、PowerPoint、Excel 文档上传入库 |
 | 终端 | 独立非特权容器，无 Docker socket；只读命令直接执行，危险命令需审批；容器可联网，带 Node，仅允许 `npx skills`（查询直接执行，安装/更新需审批） |
 | 浏览器 | 独立容器运行 agent-browser，按用户隔离会话；验证码、滑块、短信验证由你本人完成，不绕过 |
 | Skill | 把 `skills/<name>/SKILL.md` 作为工作流说明加载 |
@@ -71,6 +71,7 @@ docker compose up -d --build
 - `ASSISTANT_DOMAIN` 只保留文字、数字、连字符和空格，最长 20 个字；栏目名最长 12 个字。
 - 关闭插件只影响新库的预置内容。已经写入数据库的站点是用户数据，不会被自动删除，请在“站点”面板里手动删。
 - Skill 放在 `skills/<名称>/SKILL.md`；MCP 可在侧栏“扩展能力”面板添加（Streamable HTTP），或用 `MCP_SERVERS_JSON` 配置（含 stdio）。
+- Word、PowerPoint、Excel 文件由 [Microsoft MarkItDown](https://github.com/microsoft/markitdown)（MIT）转换为 Markdown 后入库；转换插件关闭，仅处理上传的本地文件。Office 文件解压体积上限为 100MB。
 
 ## 开发与测试
 

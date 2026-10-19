@@ -26,6 +26,7 @@ chromadb>=1.5,<2
 # 教训：凡是代码里 import 的包，就必须在这里出现，不能靠别人带。
 langchain-openai>=1.0,<2
 pypdf>=6,<7
+markitdown[docx,pptx,xlsx]>=0.1,<0.2
 cryptography>=44,<47
 
 # 会话热缓存：Redis（2026-10-07 接入）

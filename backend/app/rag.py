@@ -19,6 +19,7 @@ import logging
 import re
 import threading
 import uuid
+import zipfile
 from datetime import date
 from pathlib import Path
 from typing import Callable
@@ -38,7 +39,10 @@ from .vectorstore import get_vectorstore
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED = {".pdf", ".md", ".markdown", ".txt"}
+SUPPORTED = {".pdf", ".md", ".markdown", ".txt", ".docx", ".pptx", ".xlsx"}
+MARKITDOWN_FORMATS = {".docx", ".pptx", ".xlsx"}
+MAX_OFFICE_ARCHIVE_BYTES = 100 * 1024 * 1024
+MAX_OFFICE_ARCHIVE_ENTRIES = 10_000
 
 # 公共知识库文档的特殊归属值。它不是任何一个真实 user_id，
 # 所以「按 owner_user_id 精确匹配」的删除路径永远匹配不到它。
@@ -151,6 +155,19 @@ def _parse_file(path: Path) -> str:
 
         reader = PdfReader(str(path))
         return "\n\n".join((page.extract_text() or "") for page in reader.pages)
+    if suffix in MARKITDOWN_FORMATS:
+        try:
+            with zipfile.ZipFile(path) as archive:
+                entries = archive.infolist()
+                if len(entries) > MAX_OFFICE_ARCHIVE_ENTRIES:
+                    raise ValueError("Office 文档包含过多条目")
+                if sum(entry.file_size for entry in entries) > MAX_OFFICE_ARCHIVE_BYTES:
+                    raise ValueError("Office 文档解压后超过 100MB 限制")
+        except zipfile.BadZipFile as exc:
+            raise ValueError("Office 文档不是有效的文件") from exc
+        from markitdown import MarkItDown
+
+        return MarkItDown(enable_plugins=False).convert(str(path)).markdown
     # .md / .markdown / .txt 统一按 UTF-8 读，容错非法字节
     return path.read_text(encoding="utf-8", errors="replace")
 

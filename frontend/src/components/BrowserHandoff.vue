@@ -17,6 +17,7 @@ const viewportWidth = ref(window.innerWidth);
 const panelWidth = ref(Math.round(window.innerWidth / 2));
 
 let timer = null;
+let refreshInFlight = false;
 let pointerDown = false;
 let resizePointerId = null;
 const actionQueue = [];
@@ -77,21 +78,27 @@ function syncDockSpace() {
 }
 
 async function refresh() {
-  if (!active.value || busy.value || pointerDown || actionInFlight || actionQueue.length) return;
+  if (!active.value || refreshInFlight) return;
+  refreshInFlight = true;
   try {
-    const snapshot = await api.browserSession();
-    status.value = snapshot.status;
-    expiresIn.value = snapshot.expires_in || 0;
-    image.value && (image.value.src = snapshot.image
-      ? `data:image/jpeg;base64,${snapshot.image}`
-      : '');
-    error.value = '';
-    if (snapshot.status === 'session_expired' || snapshot.status === 'session_closed') {
-      setBrowserHandoffAvailable(false);
-      image.value && (image.value.src = '');
+    if (!busy.value && !pointerDown && !actionInFlight && !actionQueue.length) {
+      const snapshot = await api.browserSession();
+      status.value = snapshot.status;
+      expiresIn.value = snapshot.expires_in || 0;
+      image.value && (image.value.src = snapshot.image
+        ? `data:image/jpeg;base64,${snapshot.image}`
+        : '');
+      error.value = '';
+      if (snapshot.status === 'session_expired' || snapshot.status === 'session_closed') {
+        setBrowserHandoffAvailable(false);
+        image.value && (image.value.src = '');
+      }
     }
   } catch (exception) {
     error.value = exception.message || '无法读取验证页面';
+  } finally {
+    refreshInFlight = false;
+    if (active.value) timer = setTimeout(refresh, 5000);
   }
 }
 
@@ -208,17 +215,19 @@ async function closeSession() {
   }
 }
 
-watch([active, status, panelWidth, viewportWidth], ([enabled]) => {
+watch([status, panelWidth, viewportWidth], () => {
   syncDockSpace();
-  clearInterval(timer);
+});
+
+watch(active, (enabled) => {
+  clearTimeout(timer);
   if (!enabled) return;
   refresh();
-  timer = setInterval(refresh, 1500);
 }, { immediate: true });
 
 onUnmounted(() => {
   document.documentElement.style.setProperty('--browser-dock-width', '0px');
-  clearInterval(timer);
+  clearTimeout(timer);
   clearTimeout(moveTimer);
   window.removeEventListener('resize', onViewportResize);
 });

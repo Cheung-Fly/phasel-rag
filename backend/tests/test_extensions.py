@@ -2,7 +2,9 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import extensions
@@ -49,6 +51,34 @@ class ExtensionLoadingTests(unittest.TestCase):
         with patch.dict(os.environ, {"PATH": "/bin", "SECRET_KEY": "x"}, clear=True):
             env = extensions._stdio_env({"env": {"TOKEN": "t"}})
         self.assertEqual(env, {"PATH": "/bin", "TOKEN": "t"})
+
+    def test_mcp_tool_error_is_not_returned_as_successful_content(self):
+        import asyncio
+
+        class FailedToolSession:
+            async def list_tools(self):
+                return SimpleNamespace(
+                    tools=[SimpleNamespace(name="web_url_read", description="Read a webpage")]
+                )
+
+            async def call_tool(self, name, arguments):
+                return SimpleNamespace(
+                    content=[SimpleNamespace(text="URL blocked")],
+                    isError=True,
+                )
+
+        @asynccontextmanager
+        async def session(_config):
+            yield FailedToolSession()
+
+        manager = extensions.ExtensionManager()
+        config = {"Search": {"enabled": True, "transport": "streamable_http", "url": "https://search.test/mcp"}}
+        with (
+            patch("app.extensions._server_config", return_value=config),
+            patch.object(manager, "_session", session),
+            self.assertRaisesRegex(RuntimeError, "MCP 工具调用失败"),
+        ):
+            asyncio.run(manager._call("mcp__Search__web_url_read", {"url": "https://example.test"}))
 
     def test_open_breaker_blocks_call(self):
         import asyncio

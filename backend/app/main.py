@@ -30,6 +30,7 @@ import logging
 from pathlib import Path
 import os
 import posixpath
+import re
 import threading
 import uuid
 import time
@@ -188,6 +189,7 @@ def metrics_endpoint() -> Response:
 # 真正决定 embedding 成本与容器负载的是「切片数」，由 rag.ingest 里的两道闸门负责
 # （见 config.py 中 ingest_max_chars / ingest_max_chunks 的说明）。
 MAX_UPLOAD_BYTES = _settings.max_upload_mb * 1024 * 1024
+MAX_WEB_IMPORT_CHARS = 10_000
 
 
 class AskRequest(BaseModel):
@@ -298,6 +300,29 @@ class McpServerRequest(BaseModel):
         if value and not is_allowed_mcp_url(value):
             raise ValueError("HTTP MCP 必须使用 HTTPS；仅内置网页搜索端点允许 HTTP")
         return value
+
+
+class WebPageImportRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        value = value.strip()
+        try:
+            parsed = urlsplit(value)
+            _ = parsed.port
+        except ValueError as exc:
+            raise ValueError("网页导入只接受有效的 HTTPS 地址") from exc
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or "@" in parsed.netloc
+            or parsed.username
+            or parsed.password
+        ):
+            raise ValueError("网页导入只接受无凭据的 HTTPS 地址")
+        return parsed._replace(fragment="").geturl()
 
 
 def _get_auth_store():
@@ -1993,13 +2018,20 @@ async def upload(
     user: AuthenticatedUser = Depends(_current_user),
 ) -> dict:
     data = await file.read()
+    filename = file.filename or "unnamed.txt"
+    return await _accept_document_bytes(data, filename, user, response)
+
+
+async def _accept_document_bytes(
+    data: bytes,
+    filename: str,
+    user: AuthenticatedUser,
+    response: Response,
+) -> dict:
     if not data:
         raise HTTPException(400, "空文件")
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024}MB 限制")
-    filename = file.filename or "unnamed.txt"
-    # 先验文件类型再落盘：让用户在点击上传后【立刻】看到「不支持的类型」，
-    # 而不是等任务跑起来才失败。
     try:
         rag.validate_upload(filename)
     except ValueError as exc:
@@ -2053,6 +2085,68 @@ async def upload(
     except Exception as exc:
         logger.exception("ingest failed")
         raise HTTPException(500, f"入库失败：{exc}") from exc
+
+
+@app.post(
+    "/api/documents/import-url",
+    tags=["文档"],
+    summary="通过 SearXNG MCP 读取公开网页并入库",
+    status_code=202,
+)
+async def import_web_page(
+    req: WebPageImportRequest,
+    response: Response,
+    user: AuthenticatedUser = Depends(_current_user),
+) -> dict:
+    manager = ExtensionManager()
+    tools = await manager.list_tools(user.user_id)
+    readers = [
+        tool for tool in tools
+        if tool.get("name") == "web_url_read"
+        and tool.get("read_only") is True
+        and "searxng" in str(tool.get("server", "")).casefold()
+    ]
+    if not readers:
+        raise HTTPException(
+            503,
+            "未找到网页读取工具；请启用名为含 SearXNG 的 MCP 服务并确认 web_url_read 工具可用",
+        )
+    if len(readers) > 1:
+        raise HTTPException(
+            409,
+            "检测到多个 SearXNG 网页读取工具；请只启用一个后重试",
+        )
+
+    parsed = urlsplit(req.url)
+    qualified_name = readers[0]["schema"]["function"]["name"]
+    try:
+        content = await manager.call(
+            qualified_name,
+            {"url": req.url, "maxLength": MAX_WEB_IMPORT_CHARS},
+            user.user_id,
+        )
+    except Exception as exc:
+        logger.error("Web page import MCP call failed: %s", type(exc).__name__)
+        raise HTTPException(
+            502,
+            "网页读取失败；确认网址可公开访问且 SearXNG MCP 服务正常",
+        ) from exc
+    content = content.strip()
+    if not content:
+        raise HTTPException(422, "网页没有可入库的正文")
+
+    source_url = parsed._replace(query="", fragment="").geturl()
+    content = content.replace(req.url, source_url)
+    host = (parsed.hostname or "web").encode("idna").decode("ascii")
+    host = re.sub(r"[^A-Za-z0-9.-]+", "-", host).strip(".-") or "web"
+    filename = f"web-{host[:80]}-{uuid.uuid4().hex[:8]}.md"
+    markdown = f"# Web page import\n\nSource: {source_url}\n\n{content}"
+    return await _accept_document_bytes(
+        markdown.encode("utf-8"),
+        filename,
+        user,
+        response,
+    )
 
 
 @app.get("/api/documents", tags=["文档"], summary="列出已入库文档")

@@ -9,6 +9,7 @@ import { useTasks } from './useTasks.js';
 
 const documents = ref([]);
 const listError = ref('');
+const importingUrl = ref(false);
 
 /**
  * 上传进度面板的状态。
@@ -111,5 +112,26 @@ export function useDocuments() {
     }
   }
 
-  return { documents, listError, uploader, refresh, remove, upload };
+  async function importWebPage(url) {
+    if (!url || importingUrl.value) return false;
+    importingUrl.value = true;
+    try {
+      const info = await api.importWebPage(url);
+      if (info.mode === 'queued') {
+        toast(`已提交「${info.filename || '网页'}」，正在后台入库`);
+        await refreshTasks();
+      } else {
+        toast(`已将网页入库（${info.chunks ?? '?'} 个片段）`);
+        await refresh();
+      }
+      return true;
+    } catch (e) {
+      toast(`网页导入失败：${e.message}`, 'error');
+      return false;
+    } finally {
+      importingUrl.value = false;
+    }
+  }
+
+  return { documents, listError, uploader, importingUrl, refresh, remove, upload, importWebPage };
 }

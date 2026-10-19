@@ -50,7 +50,7 @@ docker compose up -d --build
 - 普通对话：直接提问。
 - 使用 MCP：`/mcp 查询当前状态`；使用 Skill：`/skill 按技能完成任务`。
 - 前端侧栏的“模型”面板管理模型档案；“扩展能力”面板管理 Skill 与 MCP。
-- 可选私有网页搜索：在 `.env` 设置随机 `SEARXNG_SECRET`，运行 `docker compose --profile web-search up -d searxng mcp-searxng`，再在“扩展能力 → MCP”添加 `http://mcp-searxng:3000/mcp` 并测试。之后用 `/mcp 搜索……` 调用。服务不发布宿主机端口；搜索词会发送给 SearXNG 使用的上游搜索引擎，请只搜索可外发的信息。
+- 可选私有网页搜索：在 `.env` 设置随机 `SEARXNG_SECRET`，运行 `docker compose --profile web-search up -d searxng mcp-searxng`，再在“扩展能力 → MCP”添加名称为 `SearXNG Web Search`、地址为 `http://mcp-searxng:3000/mcp` 的服务并测试。之后可用 `/mcp 搜索……`，也可在知识库面板输入公开 HTTPS 网页并点“导入网页”。网页读取使用 MCP 的 SSRF 防护；服务不发布宿主机端口。搜索词会发送给 SearXNG 使用的上游搜索引擎，请只搜索可外发的信息。
 
 ## 配置
 

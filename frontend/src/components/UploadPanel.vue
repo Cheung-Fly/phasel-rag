@@ -15,10 +15,15 @@ import { ref } from 'vue';
 import { useDocuments } from '../composables/useDocuments.js';
 import { useHealth } from '../composables/useHealth.js';
 
-const { uploader, upload } = useDocuments();
+const { uploader, importingUrl, upload, importWebPage } = useDocuments();
 const { maxUploadMb } = useHealth();
 
 const dragover = ref(false);
+const pageUrl = ref('');
+
+async function submitImport() {
+  if (await importWebPage(pageUrl.value)) pageUrl.value = '';
+}
 
 function pick(e) {
   const f = e.target.files && e.target.files[0];
@@ -56,6 +61,21 @@ function onDrop(e) {
 
     <input type="file" id="fileInput" accept=".md,.markdown,.txt,.pdf,.docx,.pptx,.xlsx,.html,.htm" hidden @change="pick">
 
+    <form class="url-import" @submit.prevent="submitImport">
+      <input
+        v-model="pageUrl"
+        type="url"
+        required
+        maxlength="2048"
+        placeholder="https:// 公开网页地址"
+        aria-label="要导入的公开网页地址"
+      >
+      <button type="submit" class="btn-ghost" :disabled="importingUrl">
+        {{ importingUrl ? '正在读取…' : '导入网页' }}
+      </button>
+    </form>
+    <p class="url-import-hint">需启用 SearXNG 网页读取 MCP；仅接受公开 HTTPS 页面。</p>
+
     <div v-if="uploader.active" class="upload-progress">
       <div class="up-name">{{ uploader.name }}</div>
       <div class="up-bar"><div class="up-bar-fill" :style="{ width: uploader.pct + '%' }"></div></div>
@@ -63,3 +83,9 @@ function onDrop(e) {
     </div>
   </section>
 </template>
+
+<style scoped>
+.url-import { display: flex; gap: 6px; }
+.url-import input { min-width: 0; flex: 1; }
+.url-import-hint { margin: 0; color: var(--text-faint); font-size: 11px; }
+</style>

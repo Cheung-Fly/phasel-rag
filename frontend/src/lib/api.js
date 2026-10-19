@@ -146,6 +146,10 @@ export const api = {
       xhr.send(fd);
     });
   },
+  importWebPage: (url) => json('/api/documents/import-url', {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+  }),
 
   /* ---------- 站点注册表（2026-10-15 阶段 C ①） ---------- */
   // 「助手能操作哪些站点」由用户在界面上登记，不再写死在代码里。

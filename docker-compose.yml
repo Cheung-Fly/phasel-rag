@@ -275,6 +275,7 @@ services:
       SEARXNG_URL: "http://searxng:8080"
       SEARXNG_LITE_TOOLS: "true"
       SEARXNG_DEFAULT_RESPONSE_FORMAT: "json"
+      URL_READ_MAX_CHARS: "10000"
       MCP_HTTP_HOST: "0.0.0.0"
       MCP_HTTP_PORT: "3000"
     depends_on:

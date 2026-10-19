@@ -67,6 +67,7 @@ services:
       - default
       - browser_internal
       - shell_internal
+      - fetch_internal
     env_file:
       - .env
     ports:
@@ -98,6 +99,8 @@ services:
       browser:
         condition: service_healthy
       shell:
+        condition: service_healthy
+      mcp-fetch:
         condition: service_healthy
     # ---- 内存护栏 ----
     # 由 4g 下调到 2g：向量索引（原先最占内存的部分）已迁出本进程，
@@ -238,6 +241,66 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    logging: *logging
+
+  # ------------------------------------------------------------ 隔离网页抓取
+  # Fetch 仅连接 internal 网络，不能直接出网；出站必须经过私网目的地受限的 Squid。
+  mcp-fetch:
+    build:
+      context: ./backend/fetch
+      dockerfile: Dockerfile
+    image: phase1-rag-fetch:0.1.0
+    container_name: rag-fetch
+    restart: unless-stopped
+    user: "10002:10002"
+    networks:
+      fetch_internal:
+        ipv4_address: 172.30.50.10
+    environment:
+      HTTP_PROXY: http://fetch-egress:3128
+      HTTPS_PROXY: http://fetch-egress:3128
+      ALL_PROXY: http://fetch-egress:3128
+      http_proxy: http://fetch-egress:3128
+      https_proxy: http://fetch-egress:3128
+      all_proxy: http://fetch-egress:3128
+      NO_PROXY: ""
+      no_proxy: ""
+    depends_on:
+      fetch-egress:
+        condition: service_healthy
+    mem_limit: 256m
+    memswap_limit: 384m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',3000),3); s.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *logging
+
+  fetch-egress:
+    image: ubuntu/squid:latest@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
+    container_name: rag-fetch-egress
+    restart: unless-stopped
+    networks:
+      fetch_internal:
+      fetch_egress:
+    volumes:
+      - ./deploy-fetch/squid.conf:/etc/squid/squid.conf:ro
+    mem_limit: 128m
+    memswap_limit: 192m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3128"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     logging: *logging
 
   # ------------------------------------------------------------ 可选私有网页搜索（SearXNG + MCP）
@@ -582,6 +645,14 @@ networks:
   browser_internal:
     driver: bridge
   shell_internal:
+    driver: bridge
+  fetch_internal:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.50.0/24
+  fetch_egress:
     driver: bridge
 
 volumes:

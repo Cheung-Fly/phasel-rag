@@ -90,6 +90,46 @@ class McpStore:
             ).fetchall()
         return {row["name"]: self._decrypt(row["config_ciphertext"]) for row in rows}
 
+    def migrate_builtin_fetch_to_http(
+        self,
+        name: str,
+        legacy_command: str,
+        endpoint: str,
+    ) -> int:
+        """Move only the previous built-in Fetch stdio entry to its isolated service."""
+        migrated = 0
+        with self._pool.connection() as connection:
+            rows = connection.execute(
+                "SELECT server_id, config_ciphertext FROM mcp_servers "
+                "WHERE name = %s AND transport = 'stdio'",
+                (name,),
+            ).fetchall()
+            for row in rows:
+                config = self._decrypt(row["config_ciphertext"])
+                if config.get("command") != legacy_command:
+                    continue
+                config.pop("command", None)
+                config.pop("args", None)
+                config["transport"] = "streamable_http"
+                config["url"] = endpoint
+                connection.execute(
+                    """
+                    UPDATE mcp_servers
+                       SET transport = 'streamable_http',
+                           config_ciphertext = %s,
+                           updated_at = now()
+                     WHERE server_id = %s
+                    """,
+                    (
+                        self._fernet.encrypt(
+                            json.dumps(config, ensure_ascii=False, separators=(",", ":")).encode()
+                        ).decode(),
+                        row["server_id"],
+                    ),
+                )
+                migrated += 1
+        return migrated
+
     def save(self, owner_user_id: str, name: str, config: dict) -> dict:
         clean_name = " ".join(name.split())
         if not clean_name or len(clean_name) > 80:

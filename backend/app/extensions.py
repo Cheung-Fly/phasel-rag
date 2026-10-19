@@ -28,11 +28,15 @@ MAX_TOOL_OUTPUT_CHARS = 12_000
 MCP_TIMEOUT_SECONDS = int(os.getenv("MCP_TIMEOUT_SECONDS", "30"))
 MCP_STDIO_ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")
 INTERNAL_SEARXNG_MCP_URL = "http://mcp-searxng:3000/mcp"
+INTERNAL_FETCH_MCP_URL = "http://mcp-fetch:3000/mcp"
 _breakers: dict[tuple[str, str], CircuitBreaker] = {}
 
 
 def is_allowed_mcp_url(url: str) -> bool:
-    return url.startswith("https://") or url == INTERNAL_SEARXNG_MCP_URL
+    return url.startswith("https://") or url in {
+        INTERNAL_SEARXNG_MCP_URL,
+        INTERNAL_FETCH_MCP_URL,
+    }
 
 
 def _breaker(owner_user_id: str | None, server_name: str) -> CircuitBreaker:

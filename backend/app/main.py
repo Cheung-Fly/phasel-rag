@@ -52,6 +52,7 @@ from .extensions import (
     MCP_TIMEOUT_SECONDS,
     ExtensionManager,
     delete_skill,
+    INTERNAL_FETCH_MCP_URL,
     is_allowed_mcp_url,
     sync_installed_skills,
     extension_snapshot,
@@ -210,7 +211,7 @@ def metrics_endpoint() -> Response:
 # （见 config.py 中 ingest_max_chars / ingest_max_chunks 的说明）。
 MAX_UPLOAD_BYTES = _settings.max_upload_mb * 1024 * 1024
 MAX_WEB_IMPORT_CHARS = 10_000
-FETCH_MCP_COMMAND = "/opt/mcp-fetch-venv/bin/mcp-server-fetch"
+LEGACY_FETCH_MCP_COMMAND = "/opt/mcp-fetch-venv/bin/mcp-server-fetch"
 
 
 class AskRequest(BaseModel):
@@ -1014,10 +1015,21 @@ def initialize_owner_scoping() -> None:
         )
     else:
         logger.info("操作审批闸门已就绪（PostgreSQL）")
-    if get_mcp_store_or_none() is None:
+    mcp_store = get_mcp_store_or_none()
+    if mcp_store is None:
         logger.error("MCP 配置存储初始化失败：MCP 管理功能不可用")
     else:
         logger.info("MCP 配置存储已就绪")
+        try:
+            migrated = mcp_store.migrate_builtin_fetch_to_http(
+                "Fetch网页内容抓取",
+                LEGACY_FETCH_MCP_COMMAND,
+                INTERNAL_FETCH_MCP_URL,
+            )
+            if migrated:
+                logger.info("已将 %d 个旧版 Fetch MCP 配置迁移到隔离服务", migrated)
+        except Exception as exc:
+            logger.error("旧版 Fetch MCP 配置迁移失败: %s", type(exc).__name__)
     # 审计时间线（阶段 C ④）。只读模型，它挂了不影响别的功能，但「助手做过什么」
     # 这一页会空掉 —— 而一页空白的时间线比一页报错更危险：用户会以为「助手
     # 什么都没做」，实际上可能是查不出来。所以这里必须留下启动日志。
@@ -2364,10 +2376,9 @@ def add_builtin_fetch_mcp(user: AuthenticatedUser = Depends(_current_user)) -> d
             user.user_id,
             "Fetch网页内容抓取",
             {
-                "transport": "stdio",
+                "transport": "streamable_http",
                 "enabled": True,
-                "command": FETCH_MCP_COMMAND,
-                "args": [],
+                "url": INTERNAL_FETCH_MCP_URL,
             },
         )
     except ValueError as exc:

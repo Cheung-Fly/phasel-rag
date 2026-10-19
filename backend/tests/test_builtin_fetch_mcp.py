@@ -19,10 +19,9 @@ class BuiltinFetchMcpTests(unittest.TestCase):
             "owner",
             "Fetch网页内容抓取",
             {
-                "transport": "stdio",
+                "transport": "streamable_http",
                 "enabled": True,
-                "command": "/opt/mcp-fetch-venv/bin/mcp-server-fetch",
-                "args": [],
+                "url": "http://mcp-fetch:3000/mcp",
             },
         )
 

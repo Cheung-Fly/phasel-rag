@@ -12,6 +12,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Fetch uses MCP SDK 2.x; isolate it so the API can keep its pinned MCP 1.x client.
+RUN python -m venv /opt/mcp-fetch-venv && \
+    /opt/mcp-fetch-venv/bin/pip install --no-cache-dir "mcp-server-fetch==2026.10.19"
+
 COPY app ./app
 COPY scripts ./scripts
 

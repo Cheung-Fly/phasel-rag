@@ -59,6 +59,7 @@ export const api = {
   testModel: (id) => json(`/api/models/${id}/test`, { method: 'POST' }),
   deleteModel: (id) => json(`/api/models/${id}`, { method: 'DELETE' }),
   saveMcpServer: (body) => json('/api/mcp/servers', { method: 'POST', body: JSON.stringify(body) }),
+  addBuiltinFetch: () => json('/api/mcp/builtins/fetch', { method: 'POST' }),
   testMcpServer: (id) => json(`/api/mcp/servers/${id}/test`, { method: 'POST' }),
   toggleMcpServer: (id, enabled) => json(`/api/mcp/servers/${id}?enabled=${enabled}`, { method: 'PATCH' }),
   deleteMcpServer: (id) => json(`/api/mcp/servers/${id}`, { method: 'DELETE' }),

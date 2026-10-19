@@ -287,7 +287,7 @@ class ExtensionManager:
                     item.text for item in result.content if hasattr(item, "text")
                 )
                 if result.isError:
-                    raise RuntimeError("MCP 工具调用失败")
+                    refusal = "MCP 工具调用失败"
         # 在会话关闭后再抛错，避免被 stdio 的 TaskGroup 包成异常组。
         if refusal:
             raise RuntimeError(refusal)

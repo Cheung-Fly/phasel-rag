@@ -118,6 +118,11 @@ onMounted(() => Promise.all([refresh(), loadSkills().catch(() => {}), loadServer
       <input v-model="serverForm.url" required type="url" placeholder="https://example.com/mcp" />
       <button type="submit" class="btn-ghost">添加 MCP</button>
     </form>
+    <h4>内置网页抓取</h4>
+    <p class="modal-msg">Fetch 会读取公开网页并转成 Markdown；私网地址默认拦截。</p>
+    <button type="button" class="btn-ghost" @click="run(() => api.addBuiltinFetch(), 'Fetch MCP 已添加')">
+      添加 Fetch 网页内容抓取
+    </button>
     <p v-if="message" class="modal-msg" :class="{ err: failed }">{{ message }}</p>
   </ModalDialog>
 </template>

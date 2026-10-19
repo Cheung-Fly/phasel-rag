@@ -190,6 +190,7 @@ def metrics_endpoint() -> Response:
 # （见 config.py 中 ingest_max_chars / ingest_max_chunks 的说明）。
 MAX_UPLOAD_BYTES = _settings.max_upload_mb * 1024 * 1024
 MAX_WEB_IMPORT_CHARS = 10_000
+FETCH_MCP_COMMAND = "/opt/mcp-fetch-venv/bin/mcp-server-fetch"
 
 
 class AskRequest(BaseModel):
@@ -2334,6 +2335,27 @@ def save_mcp_server(
         return {"server": get_mcp_store().save(user.user_id, req.name, config)}
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/mcp/builtins/fetch", tags=["扩展"], summary="添加内置 Fetch 网页抓取 MCP")
+def add_builtin_fetch_mcp(user: AuthenticatedUser = Depends(_current_user)) -> dict:
+    try:
+        server = get_mcp_store().save(
+            user.user_id,
+            "Fetch网页内容抓取",
+            {
+                "transport": "stdio",
+                "enabled": True,
+                "command": FETCH_MCP_COMMAND,
+                "args": [],
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        logger.error("Built-in Fetch MCP registration failed: %s", type(exc).__name__)
+        raise HTTPException(503, "无法注册内置 Fetch MCP") from exc
+    return {"server": server}
 
 
 @app.post("/api/mcp/servers/{server_id}/test", tags=["扩展"], summary="测试 MCP 连接")

@@ -51,6 +51,7 @@ docker compose up -d --build
 - 使用 MCP：`/mcp 查询当前状态`；使用 Skill：`/skill 按技能完成任务`。
 - 前端侧栏的“模型”面板管理模型档案；“扩展能力”面板管理 Skill 与 MCP。
 - 可选私有网页搜索：在 `.env` 设置随机 `SEARXNG_SECRET`，运行 `docker compose --profile web-search up -d searxng mcp-searxng`，再在“扩展能力 → MCP”添加名称为 `SearXNG Web Search`、地址为 `http://mcp-searxng:3000/mcp` 的服务并测试。之后可用 `/mcp 搜索……`，也可在知识库面板输入公开 HTTPS 网页并点“导入网页”。网页读取使用 MCP 的 SSRF 防护；服务不发布宿主机端口。搜索词会发送给 SearXNG 使用的上游搜索引擎，请只搜索可外发的信息。
+- 官方 [Fetch MCP](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch) 可在“扩展能力 → MCP → 添加 Fetch 网页内容抓取”注册；使用隔离的 MCP SDK 2.x 虚拟环境，不改变 API 的 MCP SDK 版本。Fetch 默认拦截私网地址和重定向到私网的请求，但官方注明 DNS rebinding 检查与实际连接之间仍有竞态；只抓取可信网页，不启用 `--allow-private-ips`。
 
 ## 配置
 

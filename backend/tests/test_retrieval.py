@@ -1,6 +1,8 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
+from app import retrieval
 from app.retrieval import hybrid_search, is_confident, retrieve, tokenize
 
 
@@ -111,6 +113,79 @@ class HybridRetrievalTests(unittest.TestCase):
             returned_owners = {hit[0].metadata["owner_user_id"] for hit in hits}
             self.assertEqual(returned_owners, {"shared", owner})
             self.assertIn(private_doc, [hit[0] for hit in hits])
+
+    def test_cached_corpus_refreshes_when_vector_count_changes(self):
+        class Store:
+            documents = [
+                {"id": "a", "text": "first evidence", "metadata": {"filename": "a.md"}},
+            ]
+
+            class Collection:
+                owner = None
+
+                def count(self):
+                    return len(self.owner.documents)
+
+            def __init__(self):
+                self._collection = self.Collection()
+                self._collection.owner = self
+
+            def get(self, where, include):
+                result = {"ids": [item["id"] for item in self.documents]}
+                if "documents" in include:
+                    result["documents"] = [item["text"] for item in self.documents]
+                if "metadatas" in include:
+                    result["metadatas"] = [item["metadata"] for item in self.documents]
+                return result
+
+        store = Store()
+        retrieval.invalidate_corpus_cache()
+        try:
+            first = retrieval._load_corpus(store, "owner", 10)
+            store.documents.append(
+                {"id": "b", "text": "second evidence", "metadata": {"filename": "b.md"}}
+            )
+            second = retrieval._load_corpus(store, "owner", 10)
+            self.assertEqual(len(first.documents), 1)
+            self.assertEqual(len(second.documents), 2)
+        finally:
+            retrieval.invalidate_corpus_cache()
+
+    def test_cached_corpus_refreshes_same_size_changes_after_ttl(self):
+        class Store:
+            documents = [
+                {"id": "a", "text": "old evidence", "metadata": {"filename": "a.md"}},
+            ]
+
+            class Collection:
+                owner = None
+
+                def count(self):
+                    return len(self.owner.documents)
+
+            def __init__(self):
+                self._collection = self.Collection()
+                self._collection.owner = self
+
+            def get(self, where, include):
+                result = {"ids": [item["id"] for item in self.documents]}
+                if "documents" in include:
+                    result["documents"] = [item["text"] for item in self.documents]
+                if "metadatas" in include:
+                    result["metadatas"] = [item["metadata"] for item in self.documents]
+                return result
+
+        store = Store()
+        retrieval.invalidate_corpus_cache()
+        try:
+            with patch.object(retrieval.time, "monotonic", side_effect=[10.0, 26.0, 26.0]):
+                first = retrieval._load_corpus(store, "owner", 10)
+                store.documents[0]["text"] = "new evidence"
+                second = retrieval._load_corpus(store, "owner", 10)
+            self.assertEqual(first.documents[0].page_content, "old evidence")
+            self.assertEqual(second.documents[0].page_content, "new evidence")
+        finally:
+            retrieval.invalidate_corpus_cache()
 
 
 if __name__ == "__main__":

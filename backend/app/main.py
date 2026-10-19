@@ -87,7 +87,12 @@ from .auth_store import (
 from .config import get_settings
 from .fact_store import get_fact_store
 from .memory import get_memory
-from .observability import CircuitBreaker, RuntimeMetrics, SlidingWindowRateLimiter
+from .observability import (
+    CircuitBreaker,
+    RuntimeMetrics,
+    SlidingWindowRateLimiter,
+    metrics_route_path,
+)
 from .site_store import (
     SiteAlreadyExists,
     SiteValidationError,
@@ -143,16 +148,31 @@ async def prevent_sensitive_response_caching(request: Request, call_next):
         if not allowed:
             response = Response("请求过于频繁，请稍后重试", status_code=429)
             response.headers["Retry-After"] = str(retry_after)
-            metrics.request_finished(request.method, request.url.path, 429, time.monotonic() - started)
+            metrics.request_finished(
+                request.method,
+                metrics_route_path(request.scope.get("route")),
+                429,
+                time.monotonic() - started,
+            )
             return response
     metrics.request_started()
     try:
         response = await call_next(request)
     except Exception:
-        metrics.request_finished(request.method, request.url.path, 500, time.monotonic() - started)
+        metrics.request_finished(
+            request.method,
+            metrics_route_path(request.scope.get("route")),
+            500,
+            time.monotonic() - started,
+        )
         logger.exception("Unhandled request error method=%s path=%s", request.method, request.url.path)
         raise
-    metrics.request_finished(request.method, request.url.path, response.status_code, time.monotonic() - started)
+    metrics.request_finished(
+        request.method,
+        metrics_route_path(request.scope.get("route")),
+        response.status_code,
+        time.monotonic() - started,
+    )
     if request.url.path.startswith(
         (
             "/api/auth/",

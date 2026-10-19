@@ -3,6 +3,7 @@ import logging
 import math
 import re
 import threading
+import time
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
@@ -27,8 +28,10 @@ class _LexicalCorpus:
 
 
 _CORPUS_LOCK = threading.Lock()
-_CORPUS_CACHE: dict[str, tuple[int, _LexicalCorpus]] = {}
+_CORPUS_CACHE: dict[str, tuple[int, float, _LexicalCorpus]] = {}
 _LEXICAL_DISABLED_FOR: dict[str, int] = {}
+# API and worker have separate process memory; count detects size changes and TTL bounds same-size rewrites.
+_CORPUS_CACHE_TTL_SECONDS = 15
 _RRF_CONSTANT = 60
 
 
@@ -70,12 +73,23 @@ def _load_corpus(
 ) -> _LexicalCorpus | None:
     scope = owner_user_id
     where = _owner_filter(owner_user_id)
+    collection = getattr(store, "_collection", None)
+    collection_count = None
+    if collection is not None and callable(getattr(collection, "count", None)):
+        try:
+            collection_count = int(collection.count())
+        except Exception as exc:
+            logger.warning("Chroma 语料版本读取失败，本次跳过 BM25 缓存: %s", type(exc).__name__)
+
     with _CORPUS_LOCK:
         cached = _CORPUS_CACHE.get(scope)
-        if cached is not None:
-            if cached[0] > max_chunks:
-                return None
-            return cached[1]
+        if (
+            cached is not None
+            and collection_count is not None
+            and cached[0] == collection_count
+            and time.monotonic() - cached[1] < _CORPUS_CACHE_TTL_SECONDS
+        ):
+            return cached[2]
 
         ids = store.get(where=where, include=[])["ids"]
         corpus_size = len(ids)
@@ -116,7 +130,8 @@ def _load_corpus(
             document_frequency=document_frequency,
             average_length=average_length,
         )
-        _CORPUS_CACHE[scope] = (corpus_size, corpus)
+        if collection_count is not None:
+            _CORPUS_CACHE[scope] = (collection_count, time.monotonic(), corpus)
         logger.info("Loaded %d chunks for BM25 retrieval owner=%s", len(documents), scope)
         return corpus
 

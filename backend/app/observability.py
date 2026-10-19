@@ -5,6 +5,12 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 
 
+def metrics_route_path(route: object | None) -> str:
+    """Return the route template, never a request path containing unbounded IDs."""
+    path = getattr(route, "path", None)
+    return path if isinstance(path, str) else "_unmatched"
+
+
 class SlidingWindowRateLimiter:
     def __init__(self, limit: int, window_seconds: int):
         self.limit = limit

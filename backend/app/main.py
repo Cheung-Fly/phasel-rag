@@ -51,6 +51,7 @@ from .extensions import (
     MCP_TIMEOUT_SECONDS,
     ExtensionManager,
     delete_skill,
+    is_allowed_mcp_url,
     sync_installed_skills,
     extension_snapshot,
     load_skills,
@@ -294,8 +295,8 @@ class McpServerRequest(BaseModel):
     @classmethod
     def validate_url(cls, value: str) -> str:
         value = value.strip()
-        if value and not value.startswith("https://"):
-            raise ValueError("HTTP MCP 必须使用 HTTPS URL")
+        if value and not is_allowed_mcp_url(value):
+            raise ValueError("HTTP MCP 必须使用 HTTPS；仅内置网页搜索端点允许 HTTP")
         return value
 
 

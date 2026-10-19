@@ -27,7 +27,12 @@ MAX_SKILL_CHARS = 12_000
 MAX_TOOL_OUTPUT_CHARS = 12_000
 MCP_TIMEOUT_SECONDS = int(os.getenv("MCP_TIMEOUT_SECONDS", "30"))
 MCP_STDIO_ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")
+INTERNAL_SEARXNG_MCP_URL = "http://mcp-searxng:3000/mcp"
 _breakers: dict[tuple[str, str], CircuitBreaker] = {}
+
+
+def is_allowed_mcp_url(url: str) -> bool:
+    return url.startswith("https://") or url == INTERNAL_SEARXNG_MCP_URL
 
 
 def _breaker(owner_user_id: str | None, server_name: str) -> CircuitBreaker:
@@ -175,8 +180,8 @@ class ExtensionManager:
         transport = config.get("transport", "streamable_http")
         if transport == "streamable_http":
             url = config.get("url")
-            if not isinstance(url, str) or not url.startswith("https://"):
-                raise RuntimeError("HTTP MCP 必须使用 HTTPS URL")
+            if not isinstance(url, str) or not is_allowed_mcp_url(url):
+                raise RuntimeError("HTTP MCP 必须使用 HTTPS；仅内置网页搜索端点允许 HTTP")
             async with streamablehttp_client(url) as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()

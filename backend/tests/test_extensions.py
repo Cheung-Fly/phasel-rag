@@ -9,6 +9,12 @@ from app import extensions
 
 
 class ExtensionLoadingTests(unittest.TestCase):
+    def test_only_builtin_searxng_endpoint_can_use_plain_http(self):
+        self.assertTrue(extensions.is_allowed_mcp_url("https://search.example/mcp"))
+        self.assertTrue(extensions.is_allowed_mcp_url(extensions.INTERNAL_SEARXNG_MCP_URL))
+        self.assertFalse(extensions.is_allowed_mcp_url("http://search.example/mcp"))
+        self.assertFalse(extensions.is_allowed_mcp_url("http://mcp-searxng:3000/other"))
+
     def test_load_skills_reads_only_skill_files(self):
         with tempfile.TemporaryDirectory() as root:
             skill_dir = Path(root) / "demo"

@@ -50,6 +50,7 @@ docker compose up -d --build
 - 普通对话：直接提问。
 - 使用 MCP：`/mcp 查询当前状态`；使用 Skill：`/skill 按技能完成任务`。
 - 前端侧栏的“模型”面板管理模型档案；“扩展能力”面板管理 Skill 与 MCP。
+- 可选私有网页搜索：在 `.env` 设置随机 `SEARXNG_SECRET`，运行 `docker compose --profile web-search up -d searxng mcp-searxng`，再在“扩展能力 → MCP”添加 `http://mcp-searxng:3000/mcp` 并测试。之后用 `/mcp 搜索……` 调用。服务不发布宿主机端口；搜索词会发送给 SearXNG 使用的上游搜索引擎，请只搜索可外发的信息。
 
 ## 配置
 
@@ -71,6 +72,7 @@ docker compose up -d --build
 - `ASSISTANT_DOMAIN` 只保留文字、数字、连字符和空格，最长 20 个字；栏目名最长 12 个字。
 - 关闭插件只影响新库的预置内容。已经写入数据库的站点是用户数据，不会被自动删除，请在“站点”面板里手动删。
 - Skill 放在 `skills/<名称>/SKILL.md`；MCP 可在侧栏“扩展能力”面板添加（Streamable HTTP），或用 `MCP_SERVERS_JSON` 配置（含 stdio）。
+- 可选搜索集成使用独立容器 [SearXNG](https://github.com/searxng/searxng)（AGPL-3.0）与 [mcp-searxng](https://github.com/ihor-sokoliuk/mcp-searxng)（MIT）；不启用 `web-search` profile 时不会启动或改变默认对话行为。
 - Word、PowerPoint、Excel 文件由 [Microsoft MarkItDown](https://github.com/microsoft/markitdown)（MIT）转换为 Markdown 后入库；转换插件关闭，仅处理上传的本地文件。Office 文件解压体积上限为 100MB。
 - 已保存的 HTML 网页由 [Trafilatura](https://github.com/adbar/trafilatura)（Apache-2.0）提取正文后入库；只解析用户上传的本地文件，不主动抓取 URL。
 
